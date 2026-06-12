@@ -635,10 +635,13 @@ function Modal({ title, onClose, children, width }) {
   // ESC key handler
   useEffect(() => {
     const onKeyDown = (e) => {
-      if (e.key === "Escape") onClose();
+      if (e.key === "Escape") {
+        e.stopPropagation();   // Prevent event from reaching global handler
+        onClose();
+      }
     };
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
+    window.addEventListener("keydown", onKeyDown, true); // capture = true
+    return () => window.removeEventListener("keydown", onKeyDown, true);
   }, [onClose]);
 
   const onMouseDown = (e) => {
@@ -703,6 +706,25 @@ function ColorRow({ label, value, onChange }) {
 
 // ─── Main App ─────────────────────────────────────────────────────────────────
 function App() {
+  // %%SECTION: CONSTANTS
+  const WPM_BASE = 160;
+  const DEFAULT_COLORS = { bg: "#ffffff", fg: "#000000", highlight: "#ffeb3b", word: "#4caf50" };
+  const STORAGE_KEYS = {
+    RATE: "balabolka_rate",
+    PITCH: "balabolka_pitch",
+    VOLUME: "balabolka_volume",
+    TABS: "balabolka_tabs",
+    TAB_TEXTS: "balabolka_tabTexts",
+    ACTIVE_TAB: "balabolka_activeTab",
+    ORIGINAL_MD_TEXTS: "balabolka_originalMdTexts",
+    COLORS: "balabolka_colors",
+    FONT_SETTINGS: "balabolka_fontSettings",
+    IS_RENDERED_MD: "balabolka_isRenderedMd",
+    ZOOM: "balabolka_zoom",
+    BUTTON_SIZE: "balabolka_buttonSize"
+  };
+
+  // %%SECTION: STATE - Core TTS
   const [voices, setVoices] = useState([]);
   const [selectedVoice, setSelectedVoice] = useState(null);
   const [rate, setRate] = useState(() => {
@@ -797,17 +819,22 @@ function App() {
   const [estimatedTime, setEstimatedTime] = useState(0);
   const [remainingTime, setRemainingTime] = useState(0);
 
+  // %%SECTION: STATE - Find/Replace
   const [findText, setFindText] = useState("");
   const [replaceText, setReplaceText] = useState("");
   const [findCase, setFindCase] = useState(false);
   const [findResult, setFindResult] = useState("");
+  const [findOccurrences, setFindOccurrences] = useState([]);
+  const [findCurrentIdx, setFindCurrentIdx] = useState(-1);
 
+  // %%SECTION: STATE - Recording/Export
   const [saveFileName, setSaveFileName] = useState("Documento1");
   const [isRecording, setIsRecording] = useState(false);
   const [recordError, setRecordError] = useState("");
   const mediaRecorderRef = useRef(null);
   const recordedChunksRef = useRef([]);
 
+  // %%SECTION: REFS
   const wordSpansRef = useRef([]);
   const activeTokenIdxRef = useRef(0);
   const debounceTimerRef = useRef(null);
@@ -818,6 +845,7 @@ function App() {
   const textareaRef = useRef(null);
   const speechTimerRef = useRef({ totalChars: 0 });
 
+  // %%SECTION: UTILITIES - PDF.js
   // PDF.js loader
   const loadPdfJs = () => new Promise((resolve, reject) => {
     if (window.pdfjsLib) { resolve(window.pdfjsLib); return; }
@@ -887,6 +915,7 @@ function App() {
       for (const f of Array.from(e.target.files)) await processFile(f);
   };
 
+  // %%SECTION: EFFECTS - Voice Loading & Selection
   // Load voices
   useEffect(() => {
     if (!window.speechSynthesis) { setTtsSupported(false); return; }
@@ -912,6 +941,12 @@ function App() {
     return () => { window.speechSynthesis.onvoiceschanged = null; };
   }, []);
 
+  /**
+   * Gets or creates the undo/redo history object for a specific tab index.
+   * Initializes past/future arrays if they don't exist.
+   * @param {number} tabIdx - The tab index
+   * @returns {Object} History object with past[], future[], and current
+   */
   const getTabHistory = useCallback((tabIdx) => {
     if (!historyRef.current[tabIdx]) {
       historyRef.current[tabIdx] = { past: [], future: [] };
@@ -919,6 +954,12 @@ function App() {
     return historyRef.current[tabIdx];
   }, []);
 
+  /**
+   * Pushes a new text value to the undo history for a specific tab.
+   * Maintains a max history of 100 entries and clears redo stack on new edit.
+   * @param {number} tabIdx - The tab index
+   * @param {string} val - The text value to push to history
+   */
   const pushToHistory = useCallback((tabIdx, val) => {
     const hist = getTabHistory(tabIdx);
     if (hist.current === undefined) {
@@ -934,63 +975,77 @@ function App() {
     }
   }, [getTabHistory]);
 
+  // %%SECTION: EFFECTS - History Sync on Tab Switch
   useEffect(() => {
     if (undoRedoTimerRef.current) clearTimeout(undoRedoTimerRef.current);
     const hist = getTabHistory(activeTab);
     hist.current = text;
   }, [activeTab, getTabHistory]);
 
+  // %%SECTION: EFFECTS - Auto-save to localStorage
   // [Bloco1] Auto-save config and voice selections to localStorage
   useEffect(() => {
     localStorage.setItem("balabolka_tabs", JSON.stringify(tabs));
   }, [tabs]);
 
+  // %%SECTION: EFFECTS - Auto-save to localStorage
   useEffect(() => {
     localStorage.setItem("balabolka_activeTab", activeTab);
   }, [activeTab]);
 
+  // %%SECTION: EFFECTS - Auto-save to localStorage
   useEffect(() => {
     localStorage.setItem("balabolka_colors", JSON.stringify(colors));
   }, [colors]);
 
+  // %%SECTION: EFFECTS - Auto-save to localStorage
   useEffect(() => {
     localStorage.setItem("balabolka_fontSettings", JSON.stringify(fontSettings));
   }, [fontSettings]);
 
+  // %%SECTION: EFFECTS - Auto-save to localStorage
   useEffect(() => {
     localStorage.setItem("balabolka_buttonSize", buttonSize);
   }, [buttonSize]);
 
+  // %%SECTION: EFFECTS - Auto-save to localStorage
   useEffect(() => {
     localStorage.setItem("balabolka_rate", rate);
   }, [rate]);
 
+  // %%SECTION: EFFECTS - Auto-save to localStorage
   useEffect(() => {
     localStorage.setItem("balabolka_pitch", pitch);
   }, [pitch]);
 
+  // %%SECTION: EFFECTS - Auto-save to localStorage
   useEffect(() => {
     localStorage.setItem("balabolka_volume", volume);
   }, [volume]);
 
+  // %%SECTION: EFFECTS - Auto-save to localStorage
   useEffect(() => {
     if (selectedVoice) {
       localStorage.setItem("balabolka_selectedVoice", selectedVoice.name);
     }
   }, [selectedVoice]);
 
+  // %%SECTION: EFFECTS - Auto-save to localStorage
   useEffect(() => {
     localStorage.setItem("balabolka_originalMdTexts", JSON.stringify(originalMdTexts));
   }, [originalMdTexts]);
 
+  // %%SECTION: EFFECTS - Auto-save to localStorage
   useEffect(() => {
     localStorage.setItem("balabolka_isRenderedMd", isRenderedMd);
   }, [isRenderedMd]);
 
+  // %%SECTION: EFFECTS - Auto-save to localStorage
   useEffect(() => {
     localStorage.setItem("balabolka_zoom", zoom);
   }, [zoom]);
 
+  // %%SECTION: EFFECTS - Tab Text Sync
   // Sync tab text
   useEffect(() => {
     const updated = [...tabTexts];
@@ -1000,6 +1055,7 @@ function App() {
     }
   }, [text, activeTab]);
 
+  // %%SECTION: EFFECTS - Tab Text Persistence (Debounced)
   // [Bloco1] Debounced auto-save for tab texts to localStorage and show notification
   const isInitialMount = useRef(true);
   useEffect(() => {
@@ -1039,6 +1095,7 @@ function App() {
     setEditorHtml(html);
   }, [currentWordIdx, readWords, isPlaying, isPaused, text, colors, isRenderedMd]);
 
+  // %%SECTION: EFFECTS - UI Sync
   // Auto-scroll to active word
   useEffect(() => {
     if ((isPlaying || isPaused) && editorRef.current) {
@@ -1047,6 +1104,22 @@ function App() {
     }
   }, [currentWordIdx, isPlaying, isPaused]);
 
+  // %%SECTION: EFFECTS - Clipboard Panel Toggle Sync
+  // (No effect needed - showClipboard is self-managed)
+
+  // %%SECTION: EFFECTS - Markdown Dropdown Close
+  // (No effect needed - showMdDropdown is self-managed)
+
+  /**
+   * Starts speech synthesis from a specific token index.
+   * Creates an utterance for the remaining text, sets voice/rate/pitch/volume,
+   * and uses onboundary to track word progress and calculate real-time remaining time.
+   * @param {number} startIdx - Token index to start reading from
+   * @param {number} curRate - Speech rate multiplier (0.1-10)
+   * @param {number} curPitch - Speech pitch (0-2)
+   * @param {number} curVol - Speech volume (0-1)
+   * @param {SpeechSynthesisVoice|null} curVoice - Selected voice
+   */
   const playFromTokenIndex = useCallback((startIdx, curRate, curPitch, curVol, curVoice) => {
     window.speechSynthesis.cancel();
     const textToRead = isRenderedMd ? stripMarkdown(text) : text;
@@ -1107,6 +1180,12 @@ function App() {
     setIsPlaying(true); setIsPaused(false);
   }, [text, isRenderedMd]);
 
+  // %%SECTION: HANDLERS - Cursor/Selection
+  /**
+   * Gets the token index at the current cursor position in the textarea.
+   * Converts character position to token index based on whitespace-split tokens.
+   * @returns {number} The token index at cursor position
+   */
   const getCursorTokenIndex = useCallback(() => {
     // Read selectionStart directly from <textarea> via ref
     const textarea = textareaRef.current;
@@ -1125,6 +1204,11 @@ function App() {
     return tokens.length;
   }, [text, isRenderedMd]);
 
+  // %%SECTION: HANDLERS - Playback Controls
+  /**
+   * Starts or resumes TTS playback from the current cursor position.
+   * Uses getCursorTokenIndex() to find the word index at the cursor.
+   */
   const handlePlay = useCallback(() => {
     if (!ttsSupported || !text.trim()) return;
     if (isPaused) { window.speechSynthesis.resume(); setIsPaused(false); setIsPlaying(true); return; }
@@ -1136,10 +1220,16 @@ function App() {
     playFromTokenIndex(startIdx, rate, pitch, volume, selectedVoice);
   }, [text, selectedVoice, rate, pitch, volume, isPaused, ttsSupported, playFromTokenIndex, getCursorTokenIndex]);
 
+  /**
+   * Pauses TTS playback if currently playing.
+   */
   const handlePause = useCallback(() => {
     if (isPlaying && !isPaused) { window.speechSynthesis.pause(); setIsPaused(true); setIsPlaying(false); }
   }, [isPlaying, isPaused]);
 
+  /**
+   * Stops TTS playback and resets all playback state (highlighting, cursor position, etc.).
+   */
   const handleStop = useCallback(() => {
     window.speechSynthesis.cancel();
     setIsPlaying(false); setIsPaused(false);
@@ -1148,6 +1238,7 @@ function App() {
     setCursorWordPos(0);
   }, [text]);
 
+  // %%SECTION: EFFECTS - Debounced Parameter Sync
   // Debounced live param update
   useEffect(() => {
     if (isPlaying && !isPaused) {
@@ -1159,6 +1250,7 @@ function App() {
     return () => { if (debounceTimerRef.current) clearTimeout(debounceTimerRef.current); };
   }, [rate, pitch, volume, selectedVoice, isPlaying, isPaused, playFromTokenIndex]);
 
+  // %%SECTION: EFFECTS - Word Count & Time Estimation
   // Update total words and estimated time when text changes
   useEffect(() => {
     const textToRead = isRenderedMd ? stripMarkdown(text) : text;
@@ -1174,6 +1266,7 @@ function App() {
     setEstimatedTime(timeSec);
   }, [text, isRenderedMd, rate]);
 
+  // %%SECTION: EFFECTS - Remaining Time Reset
   // Reset remaining time when not playing (real timer is driven by onboundary in playFromTokenIndex)
   useEffect(() => {
     if (!isPlaying && !isPaused) {
@@ -1181,6 +1274,11 @@ function App() {
     }
   }, [isPlaying, isPaused]);
 
+  /**
+   * Updates cursorWordPos based on current cursor position in either textarea or contentEditable.
+   * Handles both editing mode (textarea.selectionStart) and rendered/playing mode (window.getSelection).
+   * @returns {void}
+   */
   // Handle cursor position updates
   const handleCursorMove = useCallback(() => {
     const textToRead = isRenderedMd ? stripMarkdown(text) : text;
@@ -1222,12 +1320,17 @@ function App() {
     setCursorWordPos(Math.min(wordIndex2, totalWords));
   }, [text, isRenderedMd, totalWords]);
 
+  // %%SECTION: EFFECTS - Global Hotkeys
   // Global hotkeys
   useEffect(() => {
     const onKey = e => {
+      // Check if any modal is open
+      const hasModalOpen = showFindModal || showFontModal || showAboutModal || showSaveModal || showButtonSizeModal || customAlert || customConfirm;
+
       if (e.key === "F5") { e.preventDefault(); handlePlay(); }
       if (e.key === "F6") { e.preventDefault(); handlePause(); }
-      if (e.key === "Escape") { handleStop(); }
+      if (e.key === "Escape" && !hasModalOpen) { handleStop(); }
+      if (e.key === "F3") { e.preventDefault(); if (showFindModal) navigateOccurrence(e.shiftKey ? -1 : 1); }
       if (e.ctrlKey && e.key === "h") { e.preventDefault(); setShowFindModal(true); }
       if (e.ctrlKey && e.key === "f") { e.preventDefault(); setShowFindModal(true); }
       if (e.ctrlKey && e.key === "n") { e.preventDefault(); addTab(); }
@@ -1241,8 +1344,12 @@ function App() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [handlePlay, handlePause, handleStop, handleUndo, handleRedo]);
+  }, [handlePlay, handlePause, handleStop, handleUndo, handleRedo,
+      showFindModal, showFontModal, showAboutModal, showSaveModal,
+      showButtonSizeModal, customAlert, customConfirm,
+      findOccurrences, findCurrentIdx, navigateOccurrence]);
 
+  // %%SECTION: EFFECTS - Ctrl+Scroll Zoom
   // Ctrl+Scroll zoom
   useEffect(() => {
     const onWheel = e => {
@@ -1256,27 +1363,46 @@ function App() {
     return () => window.removeEventListener("wheel", onWheel);
   }, []);
 
-  const addTab = () => {
+  // %%SECTION: HANDLERS - Tab Management
+  /**
+   * Creates a new tab with an empty document.
+   * Stops any ongoing playback.
+   */
+  const addTab = useCallback(() => {
     const name = `Documento${tabs.length + 1}`;
     setTabs([...tabs, name]); setTabTexts([...tabTexts, ""]);
     setActiveTab(tabs.length); setText(""); setIsDirty(false); handleStop();
-  };
+  }, [tabs, tabTexts, handleStop]);
 
-  const switchTab = idx => {
+  /**
+   * Switches to the tab at the given index.
+   * Saves current text to the previous tab before switching.
+   */
+  const switchTab = useCallback((idx) => {
     const updated = [...tabTexts]; updated[activeTab] = text;
     setTabTexts(updated); setActiveTab(idx); setText(updated[idx] || ""); handleStop();
-  };
+  }, [tabTexts, activeTab, text, handleStop]);
 
-  const closeTab = (idx, e) => {
+  /**
+   * Closes the tab at the given index.
+   * Prevents closing the last remaining tab.
+   */
+  const closeTab = useCallback((idx, e) => {
     e.stopPropagation(); if (tabs.length === 1) return;
     const newTabs = tabs.filter((_,i)=>i!==idx);
     const newTexts = tabTexts.filter((_,i)=>i!==idx);
     const newActive = Math.min(activeTab, newTabs.length-1);
     setTabs(newTabs); setTabTexts(newTexts); setActiveTab(newActive);
     setText(newTexts[newActive]||""); handleStop();
-  };
+  }, [tabs, tabTexts, activeTab, handleStop]);
 
-  const handleTextChange = (newText) => {
+  // %%SECTION: HANDLERS - Text & History
+  /**
+   * Updates the editor text and marks the document as dirty.
+   * Debounces history push to avoid excessive undo entries on every keystroke.
+   * @param {string} newText - The new text content
+   */
+  const handleTextChange = useCallback((newText) => {
     setText(newText);
     setIsDirty(true);
     isEditingRef.current = true;
@@ -1286,9 +1412,14 @@ function App() {
     undoRedoTimerRef.current = setTimeout(() => {
       pushToHistory(tabIdx, newText);
     }, 500);
-  };
+  }, [activeTab]);
 
-  const handleUndo = () => {
+  // %%SECTION: HANDLERS - Undo/Redo
+  /**
+   * Undoes the last text change for the active tab.
+   * Uses the per-tab history stack.
+   */
+  const handleUndo = useCallback(() => {
     const hist = getTabHistory(activeTab);
     if (hist.past.length > 0) {
       if (undoRedoTimerRef.current) {
@@ -1303,9 +1434,13 @@ function App() {
       setText(prev);
       setIsDirty(true);
     }
-  };
+  }, [activeTab, text]);
 
-  const handleRedo = () => {
+  /**
+   * Redoes the next text change for the active tab.
+   * Uses the per-tab history stack.
+   */
+  const handleRedo = useCallback(() => {
     const hist = getTabHistory(activeTab);
     if (hist.future.length > 0) {
       const next = hist.future.pop();
@@ -1316,7 +1451,7 @@ function App() {
       setText(next);
       setIsDirty(true);
     }
-  };
+  }, [activeTab]);
 
   const handleCleanMarkdown = () => {
     setCustomConfirm({
@@ -1353,15 +1488,77 @@ function App() {
     }
   };
 
-  const handleFind = () => {
+  // %%SECTION: HANDLERS - Find/Replace
+  /**
+   * Finds all occurrences of findText in the current text.
+   * Updates findOccurrences array and highlights the first match.
+   */
+  const handleFind = useCallback(() => {
     if (!findText) return;
     const flags = findCase ? "g" : "gi";
     const regex = new RegExp(findText.replace(/[.*+?^${}()|[\]\\]/g,"\\$&"), flags);
     const matches = text.match(regex);
     setFindResult(matches ? `${matches.length} ocorrência(s) encontrada(s).` : "Nenhuma ocorrência encontrada.");
-  };
+    // Also compute all occurrences for navigation
+    const occurrences = findAllOccurrences(text, findText, findCase);
+    setFindOccurrences(occurrences);
+    if (occurrences.length > 0) {
+      setFindCurrentIdx(0);
+      // Highlight first occurrence in textarea
+      scrollToOccurrence(occurrences[0]);
+    }
+  }, [findText, findCase, text]);
 
-  const handleReplace = () => {
+  /**
+   * Returns all occurrences of searchText in sourceText.
+   * @param {string} sourceText - The text to search in
+   * @param {string} searchText - The text to search for
+   * @param {boolean} caseSensitive - Whether to match case
+   * @returns {Array<{start:number, end:number}>} Array of match positions
+   */
+  const findAllOccurrences = useCallback((sourceText, searchText, caseSensitive) => {
+    if (!searchText) return [];
+    const flags = caseSensitive ? "g" : "gi";
+    const escaped = searchText.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const regex = new RegExp(escaped, flags);
+    const results = [];
+    let match;
+    while ((match = regex.exec(sourceText)) !== null) {
+      results.push({ start: match.index, end: match.index + match[0].length });
+      if (!flags.includes("g")) break; // safety for non-global
+    }
+    return results;
+  }, []);
+
+  /**
+   * Scrolls the textarea to show the given occurrence and selects it.
+   * @param {{start:number, end:number}} occ - The occurrence to scroll to
+   */
+  const scrollToOccurrence = useCallback((occ) => {
+    const textarea = textareaRef.current;
+    if (!textarea) return;
+    textarea.setSelectionRange(occ.start, occ.end);
+    textarea.focus();
+  }, []);
+
+  /**
+   * Navigates to the next or previous occurrence.
+   * @param {number} direction - 1 for next, -1 for previous
+   */
+  const navigateOccurrence = useCallback((direction) => {
+    if (findOccurrences.length === 0) return;
+    let nextIdx = findCurrentIdx + direction;
+    if (nextIdx < 0) nextIdx = findOccurrences.length - 1;
+    if (nextIdx >= findOccurrences.length) nextIdx = 0;
+    setFindCurrentIdx(nextIdx);
+    scrollToOccurrence(findOccurrences[nextIdx]);
+  }, [findOccurrences, findCurrentIdx]);
+
+  /**
+   * Replaces all occurrences of findText with replaceText in the current text.
+   * Updates history for undo/redo.
+   */
+  const handleReplace = useCallback(() => {
     if (!findText) return;
     const flags = findCase ? "g" : "gi";
     const regex = new RegExp(findText.replace(/[.*+?^${}()|[\]\\]/g,"\\$&"), flags);
@@ -1370,14 +1567,21 @@ function App() {
     setText(nextVal);
     pushToHistory(activeTab, nextVal);
     setFindResult("Substituição realizada."); setIsDirty(true);
-  };
+  }, [findText, findCase, activeTab, text]);
 
-  const handleSaveAudio = () => {
+  /**
+   * Opens the "Save as Audio" modal with the current tab name as default filename.
+   */
+  const handleSaveAudio = useCallback(() => {
     if (!text.trim()) { setCustomAlert({ title:"Aviso", message:"Nenhum texto para converter em áudio!" }); return; }
     setSaveFileName(tabs[activeTab]); setShowSaveModal(true);
-  };
+  }, [text, tabs, activeTab]);
 
-  const confirmSave = async () => {
+  /**
+   * Starts recording the TTS playback to an audio file using MediaRecorder.
+   * Uses getDisplayMedia to capture tab audio (requires user permission).
+   */
+  const confirmSave = useCallback(async () => {
     if (!ttsSupported || !text.trim()) return;
     setRecordError("");
     try {
@@ -1414,17 +1618,24 @@ function App() {
       utter.onerror = () => { if (mediaRecorderRef.current?.state !== "inactive") mediaRecorderRef.current.stop(); };
       window.speechSynthesis.speak(utter);
     } catch { setRecordError("Permissão de captura negada ou indisponível."); }
-  };
+  }, [ttsSupported, text, isRenderedMd, selectedVoice, rate, pitch, volume, saveFileName]);
 
-  const handleSaveText = () => {
+  /**
+   * Saves the current text content as a .txt file download.
+   */
+  const handleSaveText = useCallback(() => {
     const blob = new Blob([text], { type:"text/plain;charset=utf-8" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a"); a.href = url;
     a.download = `${tabs[activeTab]}.txt`; a.click();
     URL.revokeObjectURL(url); setIsDirty(false);
-  };
+  }, [text, tabs, activeTab]);
 
-  const handleNewDoc = () => {
+  /**
+   * Creates a new empty document in the current tab.
+   * Prompts for confirmation if there are unsaved changes.
+   */
+  const handleNewDoc = useCallback(() => {
     if (isDirty && text) {
       setCustomConfirm({
         title:"Criar Novo Documento",
@@ -1438,37 +1649,52 @@ function App() {
       const updated = [...tabTexts]; updated[activeTab] = "";
       setTabTexts(updated); setText(""); setIsDirty(false); handleStop();
     }
-  };
+  }, [isDirty, text, tabTexts, activeTab, handleStop]);
 
-  const handleSelectAll = () => {
+  /**
+   * Selects all text content in the editor (contentEditable mode).
+   */
+  const handleSelectAll = useCallback(() => {
     if (editorRef.current) {
       const range = document.createRange(); range.selectNodeContents(editorRef.current);
       const sel = window.getSelection(); sel?.removeAllRanges(); sel?.addRange(range);
     }
-  };
+  }, []);
 
-  const handleCopy = async () => {
+  /**
+   * Copies selected text or all text to clipboard.
+   * Falls back to document.execCommand for older browsers.
+   */
+  const handleCopy = useCallback(async () => {
     const sel = window.getSelection()?.toString() || text;
     try { await navigator.clipboard.writeText(sel); }
     catch {
       const el = document.createElement("textarea"); el.value = sel;
       document.body.appendChild(el); el.select(); document.execCommand("copy"); document.body.removeChild(el);
     }
-  };
+  }, [text]);
 
-  const handlePaste = async () => {
+  /**
+   * Pastes text from clipboard into the editor.
+   * Falls back to alert if clipboard API is unavailable.
+   */
+  const handlePaste = useCallback(async () => {
     try { const t = await navigator.clipboard.readText(); setText(prev=>prev+t); setIsDirty(true); }
     catch { setCustomAlert({ title:"Erro", message:"Use Ctrl+V diretamente no editor." }); }
-  };
+  }, []);
 
-  const testVoice = () => {
+  /**
+   * Plays a test phrase with the currently selected voice and settings.
+   */
+  const testVoice = useCallback(() => {
     const utter = new SpeechSynthesisUtterance("Olá! Testando o timbre da nova voz.");
     if (selectedVoice) utter.voice = selectedVoice;
     utter.rate = rate; utter.pitch = pitch; utter.volume = volume;
     utter.lang = selectedVoice?.lang || "pt-BR";
     window.speechSynthesis.cancel(); window.speechSynthesis.speak(utter);
-  };
+  }, [selectedVoice, rate, pitch, volume]);
 
+  // %%SECTION: EFFECTS - Outside Click to Close Menus
   useEffect(() => {
     const h = () => {
       setActiveMenu(null);
@@ -1915,10 +2141,19 @@ function App() {
                 color: findResult.includes("Nenhuma")?"#b91c1c":"#15803d",
               }}>{findResult}</div>
             )}
+            {findOccurrences.length > 0 && (
+              <div style={{display:"flex", alignItems:"center", justifyContent:"space-between", padding:"4px 8px", fontSize:12, background:"#f9fafb", border:"1px solid #e5e7eb", borderRadius:2}}>
+                <span>{findCurrentIdx + 1} de {findOccurrences.length}</span>
+                <div style={{display:"flex", gap:4}}>
+                  <button className="xp-btn" style={{padding:"2px 8px", fontSize:11}} onClick={()=>navigateOccurrence(-1)} title="Anterior (Shift+F3)">↑ Anterior</button>
+                  <button className="xp-btn" style={{padding:"2px 8px", fontSize:11}} onClick={()=>navigateOccurrence(1)} title="Próximo (F3)">Próximo ↓</button>
+                </div>
+              </div>
+            )}
             <div style={{display:"flex", gap:8, paddingTop:4}}>
               <button className="xp-btn" onClick={handleFind}>Localizar</button>
               <button className="xp-btn" onClick={handleReplace}>Substituir Tudo</button>
-              <button className="xp-btn cancel" onClick={()=>{setShowFindModal(false);setFindResult("");}}>Fechar</button>
+              <button className="xp-btn cancel" onClick={()=>{setShowFindModal(false);setFindResult("");setFindOccurrences([]);setFindCurrentIdx(-1);}}>Fechar</button>
             </div>
           </div>
         </Modal>
