@@ -632,6 +632,7 @@ function Modal({ title, onClose, children, width }) {
   const dragOffset = useRef({ x: 0, y: 0 });
   const modalBoxRef = useRef(null);
 
+  // %%SECTION: EFFECTS - Modal ESC Key
   // ESC key handler
   useEffect(() => {
     const onKeyDown = (e) => {
@@ -654,6 +655,7 @@ function Modal({ title, onClose, children, width }) {
     e.preventDefault();
   };
 
+  // %%SECTION: EFFECTS - Modal Drag
   useEffect(() => {
     const onMouseMove = (e) => {
       if (!isDragging) return;
@@ -860,7 +862,12 @@ function App() {
     document.head.appendChild(script);
   });
 
-  const processFile = async (file) => {
+  /**
+   * Processes a dropped or selected file and adds it as a new tab.
+   * Supports PDF (via PDF.js), HTML/HTM (strips tags), and plain text files.
+   * @param {File} file - The file to process
+   */
+  const processFile = useCallback(async (file) => {
     const ext = file.name.split(".").pop()?.toLowerCase();
     let fileText = "";
     try {
@@ -900,20 +907,40 @@ function App() {
     } catch(err) {
       setCustomAlert({ title:"Erro ao Abrir Arquivo", message: err.message || "Erro desconhecido." });
     }
-  };
+  }, [loadPdfJs, handleStop]);
 
-  const handleDragOver = e => { e.preventDefault(); setIsDraggingFile(true); };
-  const handleDragLeave = e => { e.preventDefault(); setIsDraggingFile(false); };
-  const handleDrop = async e => {
+  /**
+   * Handles drag over event for file drop zone.
+   * Shows visual feedback that a file can be dropped.
+   */
+  const handleDragOver = useCallback((e) => { e.preventDefault(); setIsDraggingFile(true); }, []);
+
+  /**
+   * Handles drag leave event for file drop zone.
+   * Removes visual feedback.
+   */
+  const handleDragLeave = useCallback((e) => { e.preventDefault(); setIsDraggingFile(false); }, []);
+
+  /**
+   * Handles file drop event.
+   * Processes all dropped files.
+   */
+  const handleDrop = useCallback(async (e) => {
     e.preventDefault(); setIsDraggingFile(false);
     if (e.dataTransfer.files?.length > 0)
       for (const f of Array.from(e.dataTransfer.files)) await processFile(f);
-  };
-  const triggerFileInput = () => fileInputRef.current?.click();
-  const handleFileChange = async e => {
+  }, [processFile]);
+
+  const triggerFileInput = useCallback(() => fileInputRef.current?.click(), []);
+
+  /**
+   * Handles file input change event.
+   * Processes all selected files.
+   */
+  const handleFileChange = useCallback(async (e) => {
     if (e.target.files?.length > 0)
       for (const f of Array.from(e.target.files)) await processFile(f);
-  };
+  }, [processFile]);
 
   // %%SECTION: EFFECTS - Voice Loading & Selection
   // Load voices
@@ -1453,7 +1480,12 @@ function App() {
     }
   }, [activeTab]);
 
-  const handleCleanMarkdown = () => {
+  /**
+   * Removes all Markdown formatting from the current document.
+   * Saves the original text first so it can be restored later.
+   * Prompts for confirmation before proceeding.
+   */
+  const handleCleanMarkdown = useCallback(() => {
     setCustomConfirm({
       title: "Limpar marcações",
       message: "Tem certeza de que deseja remover permanentemente todas as marcações Markdown deste texto?",
@@ -1471,9 +1503,13 @@ function App() {
         setIsDirty(true);
       }
     });
-  };
+  }, [activeTab, text]);
 
-  const handleRestoreOriginal = () => {
+  /**
+   * Restores the original Markdown text before cleaning.
+   * Uses the saved copy in originalMdTexts for the active tab.
+   */
+  const handleRestoreOriginal = useCallback(() => {
     const orig = originalMdTexts[activeTab];
     if (orig !== undefined && orig !== null) {
       pushToHistory(activeTab, text);
@@ -1486,7 +1522,7 @@ function App() {
         message: "Nenhum texto original guardado para este documento."
       });
     }
-  };
+  }, [activeTab, text, originalMdTexts]);
 
   // %%SECTION: HANDLERS - Find/Replace
   /**
