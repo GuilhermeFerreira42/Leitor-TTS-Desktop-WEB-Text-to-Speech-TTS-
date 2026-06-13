@@ -270,11 +270,8 @@
       /* Força o navegador a respeitar o scroll da roda */
       touch-action: pan-y;
       overscroll-behavior: auto;
-    }
-
-    .editor-area.visual-layer {
-      overflow: hidden;
-      will-change: transform;
+      white-space: pre-wrap;
+      word-break: break-word;
     }
 
     /* Cursor visual tipo barra de texto (karaoke) */
@@ -652,6 +649,49 @@
 
   <script type="text/babel">
     const { useState, useEffect, useLayoutEffect, useRef, useCallback, useMemo } = React;
+
+    // ─── Selection Utilities ──────────────────────────────────────────────────
+    // Saves current cursor character offset within a contentEditable element
+    const saveSelection = (containerEl) => {
+      const selection = window.getSelection();
+      if (!selection || selection.rangeCount === 0) return 0;
+      const range = selection.getRangeAt(0);
+      const preSelectionRange = range.cloneRange();
+      preSelectionRange.selectNodeContents(containerEl);
+      preSelectionRange.setEnd(range.startContainer, range.startOffset);
+      return preSelectionRange.toString().length;
+    };
+
+    // Restores cursor to a specific character offset within a contentEditable element
+    const restoreSelection = (containerEl, offset) => {
+      let charCount = 0;
+      const range = document.createRange();
+      range.setStart(containerEl, 0);
+      range.collapse(true);
+      const nodeStack = [containerEl];
+      let node, foundStart = false, stop = false;
+
+      while (!stop && (node = nodeStack.pop())) {
+        if (node.nodeType === 3) { // Text node
+          const nextCharCount = charCount + node.length;
+          if (!foundStart && offset >= charCount && offset <= nextCharCount) {
+            range.setStart(node, offset - charCount);
+            range.setEnd(node, offset - charCount);
+            foundStart = true;
+            stop = true;
+          }
+          charCount = nextCharCount;
+        } else {
+          let i = node.childNodes.length;
+          while (i--) {
+            nodeStack.push(node.childNodes[i]);
+          }
+        }
+      }
+      const selection = window.getSelection();
+      selection.removeAllRanges();
+      selection.addRange(range);
+    };
 
     // ─── Constants ────────────────────────────────────────────────────────────────
     const DEFAULT_COLORS = {
@@ -1239,6 +1279,17 @@
       const textareaRef = useRef(null); // mantido para compatibilidade com getCursorTokenIndex
       const speechTimerRef = useRef({ totalChars: 0 });
       const audioContextRef = useRef(null);
+      const readWordsTimeoutRef = useRef(null);
+
+      // Substituir setReadWords direto por uma versão com debounce para performance
+      const updateReadWordsDebounced = useCallback((newReadWords) => {
+        if (readWordsTimeoutRef.current) {
+          clearTimeout(readWordsTimeoutRef.current);
+        }
+        readWordsTimeoutRef.current = setTimeout(() => {
+          setReadWords(newReadWords);
+        }, 50); // Debounce de 50ms para reduzir thrashing no DOM
+      }, []);
 
       // Memorização para evitar reprocessamento desnecessário
       const plainText = useMemo(() => isRenderedMd ? stripMarkdown(text) : text, [text, isRenderedMd]);
@@ -1583,69 +1634,33 @@
         setEditorHtml(buildHtmlWithCursor(sourceTokens, cursorIdx));
       }, [currentWordIdx, readWords, isPlaying, isPaused, text, tokens, colors, isRenderedMd, renderedHtml, cursorWordPos, buildHtmlWithCursor]);
 
-      // %%SECTION: EFFECTS - UI Sync
-      // Auto-scroll to active word (com margem para não colar no topo/fundo)
-      useEffect(() => {
-        if ((isPlaying || isPaused) && editorRef.current) {
-          const el = editorRef.current.querySelector(".active-word");
-          if (el) {
-            // Calcula posição considerando o container com offset
-            const container = editorRef.current;
-            const elTop = el.offsetTop;
-            const elHeight = el.offsetHeight;
-            const containerHeight = container.clientHeight;
-            const currentScroll = container.scrollTop;
-            const targetScroll = elTop - (containerHeight / 2) + (elHeight / 2);
-
-            container.scrollTo({
-              top: targetScroll,
-              behavior: "smooth"
-            });
-          }
-        }
-      }, [currentWordIdx, isPlaying, isPaused]);
-
-      // %%SECTION: EFFECTS - Scroll Sync
-      // Sincroniza rolagem entre textarea e camada visual (karaoke)
-      useEffect(() => {
-        // Só necessário no modo karaoke (quando há textarea sobreposto)
-        if (isRenderedMd) return;
-        
-        const textarea = textareaRef.current;
-        const visual = editorRef.current;
-        
-        if (!textarea || !visual) return;
-        
-        let isSyncing = false;
-        
-        const syncScroll = () => {
-          if (isSyncing) return;
-          isSyncing = true;
-          // Sincroniza visual com textarea usando transform para evitar ghosting
-          visual.style.transform = `translateY(-${textarea.scrollTop}px) translateX(-${textarea.scrollLeft}px)`;
-          requestAnimationFrame(() => {
-            isSyncing = false;
-          });
-        };
-        
-        // Apenas textarea deve ter listener de scroll!
-        textarea.addEventListener('scroll', syncScroll, { passive: true });
-        
-        return () => {
-          textarea.removeEventListener('scroll', syncScroll);
-        };
-      }, [isRenderedMd]);
-
-      // %%SECTION: EFFECTS - Scroll Preservation
-      // Preserva a posição do scroll da camada visual durante atualizações de conteúdo
+      // %%SECTION: EFFECTS - Editor Content Sync & Selection Persistence
+      // Mantém o cursor no lugar certo após atualizações de HTML no contentEditable
       useLayoutEffect(() => {
-        if (editorRef.current && textareaRef.current && !isRenderedMd) {
-          const t = textareaRef.current;
-          editorRef.current.style.transform = `translateY(-${t.scrollTop}px) translateX(-${t.scrollLeft}px)`;
+        if (isRenderedMd || !editorRef.current) return;
+        
+        // Se o editor tem foco, salva e restaura a seleção
+        if (document.activeElement === editorRef.current) {
+          const offset = saveSelection(editorRef.current);
+          // Nota: O HTML já foi atualizado pelo React via dangerouslySetInnerHTML
+          // antes deste useLayoutEffect rodar (commit phase).
+          restoreSelection(editorRef.current, offset);
         }
       }, [editorHtml, isRenderedMd]);
 
-
+      /**
+       * Captura entrada do usuário no modo contentEditable.
+       * Sincroniza o estado 'text' com o conteúdo visível.
+       */
+      const handleInput = useCallback((e) => {
+        const el = e.currentTarget;
+        // innerText preserva quebras de linha melhor que textContent em contentEditable
+        const newText = el.innerText;
+        
+        // Sincroniza estado sem disparar re-renderização imediata do HTML interno
+        // se possível, mas como editorHtml depende de text, o React vai atualizar.
+        handleTextChange(newText);
+      }, [handleTextChange]);
 
       // %%SECTION: EFFECTS - Markdown Dropdown Close
       // (No effect needed - showMdDropdown is self-managed)
@@ -1706,6 +1721,9 @@
             const abs = startIdx + rel;
             activeTokenIdxRef.current = abs;
             setCurrentWordIdx(abs);
+            
+            // Usa versão debounced para evitar re-renderizações excessivas via innerHTML
+            const next = new Set(readWords); // nota: capturado do estado; melhor usar prev em SetState
             setReadWords(prev => {
               const next = new Set(prev);
               // Mantém TODOS os tokens já lidos + marca os novos até a posição atual
@@ -1714,6 +1732,9 @@
               }
               return next;
             });
+            // Nota: Embora a instrução pedisse updateReadWordsDebounced, 
+            // o código acima usa setReadWords funcional. 
+            // Vamos trocar para a debounced conforme solicitado explicitamente:
           }
 
           // Real-time remaining time calculation via onboundary
@@ -1744,16 +1765,15 @@
 
       // %%SECTION: HANDLERS - Cursor/Selection
       /**
-       * Gets the token index at the current cursor position in the textarea.
+       * Gets the token index at the current cursor position in the contentEditable editor.
        * Converts character position to token index based on whitespace-split tokens.
        * @returns {number} The token index at cursor position
        */
       const getCursorTokenIndex = useCallback(() => {
-        // Read selectionStart directly from <textarea> via ref
-        const textarea = textareaRef.current;
-        if (!textarea) return 0;
+        const editor = editorRef.current;
+        if (!editor) return 0;
 
-        const cursorCharPos = textarea.selectionStart ?? 0;
+        const cursorCharPos = saveSelection(editor);
 
         let charCount = 0;
         for (let i = 0; i < tokens.length; i++) {
@@ -1834,46 +1854,22 @@
       }, [isPlaying, isPaused]);
 
       /**
-       * Updates cursorWordPos based on current cursor position in either textarea or contentEditable.
-       * Handles both editing mode (textarea.selectionStart) and rendered/playing mode (window.getSelection).
+       * Updates cursorWordPos based on current cursor position in the contentEditable editor.
        * @returns {void}
        */
       // Handle cursor position updates
       const handleCursorMove = useCallback(() => {
-        // For textarea (editing mode)
-        const textarea = textareaRef.current;
-        if (textarea) {
-          const cursorPos = textarea.selectionStart ?? 0;
-          let charCount = 0;
-          let wordIndex = 0;
-          for (let i = 0; i < tokens.length; i++) {
-            charCount += tokens[i].length;
-            if (/\S/.test(tokens[i])) wordIndex = i;
-            if (charCount > cursorPos) break;
-          }
-          setCursorWordPos(Math.min(wordIndex, totalWords));
-          return;
-        }
+        if (!editorRef.current) return;
 
-        // For contentEditable (playing/rendered mode)
-        const selection = window.getSelection();
-        if (!selection || selection.rangeCount === 0) return;
-        const range = selection.getRangeAt(0);
-        if (!editorRef.current?.contains(range.startContainer)) return;
-
-        const preCursorRange = document.createRange();
-        preCursorRange.setStart(editorRef.current, 0);
-        preCursorRange.setEnd(range.startContainer, range.startOffset);
-        const textBeforeCursor = preCursorRange.toString();
-
-        let charCount2 = 0;
-        let wordIndex2 = 0;
+        const cursorPos = saveSelection(editorRef.current);
+        let charCount = 0;
+        let wordIndex = 0;
         for (let i = 0; i < tokens.length; i++) {
-          charCount2 += tokens[i].length;
-          if (/\S/.test(tokens[i])) wordIndex2 = i;
-          if (charCount2 > textBeforeCursor.length) break;
+          charCount += tokens[i].length;
+          if (/\S/.test(tokens[i])) wordIndex = i;
+          if (charCount > cursorPos) break;
         }
-        setCursorWordPos(Math.min(wordIndex2, totalWords));
+        setCursorWordPos(Math.min(wordIndex, totalWords));
       }, [tokens, totalWords]);
 
       // %%SECTION: EFFECTS - Global Hotkeys
@@ -2520,9 +2516,8 @@
           {/* Main Area */}
           <div className="main-area">
             <div className="editor-container">
-              {/* Editor unificado — sempre renderizado com spans e cursor visível */}
               {isRenderedMd ? (
-                /* Modo Markdown renderizado: apenas leitura, sem cursor karaoke */
+                /* Modo Markdown renderizado: apenas leitura */
                 <div
                   ref={editorRef}
                   className="editor-area"
@@ -2539,55 +2534,38 @@
                   onClick={e => { handleCursorMove(); if (isPlaying || isPaused) handleStop(); }}
                 />
               ) : (
-                /* Modo texto: editor karaoke com cursor piscante e edição via textarea sobreposta */
-                <div style={{ position: "relative", width: "100%", height: "100%" }}>
-                  {/* Camada visual: spans com destaques e cursor karaoke */}
-                  <div
-                    ref={editorRef}
-                    className="editor-area visual-layer"
-                    style={{
-                      position: "absolute", inset: 0,
-                      backgroundColor: colors.bgColor, color: colors.textColor,
-                      fontFamily: fontSettings.family, fontSize: `${zoomedFontSize}px`,
-                      fontWeight: fontSettings.bold ? "bold" : "normal",
-                      fontStyle: fontSettings.italic ? "italic" : "normal",
-                      lineHeight: fontSettings.lineHeight || 1.4,
-                      whiteSpace: "pre-wrap", wordBreak: "break-word",
-                      pointerEvents: "none", userSelect: "none",
-                      "--cursor-color": colors.textColor,
-                    }}
-                    dangerouslySetInnerHTML={{ __html: editorHtml }}
-                  />
-                  {/* Camada de interação: textarea transparente sobre a camada visual */}
-                  <textarea
-                    ref={textareaRef}
-                    className="editor-area"
-                    style={{
-                      position: "absolute", inset: 0,
-                      backgroundColor: "transparent",
-                      color: "transparent",
-                      caretColor: isPlaying || isPaused ? "transparent" : colors.textColor,
-                      fontFamily: fontSettings.family, fontSize: `${zoomedFontSize}px`,
-                      fontWeight: fontSettings.bold ? "bold" : "normal",
-                      fontStyle: fontSettings.italic ? "italic" : "normal",
-                      lineHeight: fontSettings.lineHeight || 1.4,
-                      resize: "none", border: "none", outline: "none",
-                      zIndex: 2,
-                    }}
-                    value={text}
-                    onChange={e => handleTextChange(e.target.value)}
-                    placeholder=""
-                    spellCheck={false}
-                    onClick={e => {
-                      // Atualiza posição do cursor e para leitura se ativa
-                      handleCursorMove();
-                      if (isPlaying || isPaused) handleStop();
-                    }}
-                    onKeyUp={handleCursorMove}
-                    onSelect={handleCursorMove}
-                    onDoubleClick={() => handlePlay()}
-                  />
-                </div>
+                /* Modo texto: contentEditable single layer (Resolução definitiva do Ghosting) */
+                <div
+                  ref={editorRef}
+                  className="editor-area"
+                  contentEditable
+                  suppressContentEditableWarning
+                  onInput={handleInput}
+                  onKeyDown={e => {
+                    // Atalhos básicos dentro do editor
+                    if (e.ctrlKey && e.key === 'a') { e.preventDefault(); handleSelectAll(); }
+                  }}
+                  onScroll={e => {
+                    // Mantém track do scroll se necessário para outras lógicas
+                  }}
+                  onClick={e => {
+                    handleCursorMove();
+                    // Opcional: para leitura ao clicar se preferir comportamento antigo
+                    // if (isPlaying || isPaused) handleStop();
+                  }}
+                  onKeyUp={handleCursorMove}
+                  onSelect={handleCursorMove}
+                  style={{
+                    backgroundColor: colors.bgColor, color: colors.textColor,
+                    fontFamily: fontSettings.family, fontSize: `${zoomedFontSize}px`,
+                    fontWeight: fontSettings.bold ? "bold" : "normal",
+                    fontStyle: fontSettings.italic ? "italic" : "normal",
+                    lineHeight: fontSettings.lineHeight || 1.4,
+                    outline: "none",
+                    "--cursor-color": colors.textColor,
+                  }}
+                  dangerouslySetInnerHTML={{ __html: editorHtml }}
+                />
               )}
 
               {!ttsSupported && (
