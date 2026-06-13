@@ -651,43 +651,55 @@
     const { useState, useEffect, useLayoutEffect, useRef, useCallback, useMemo } = React;
 
     // ─── Selection Utilities ──────────────────────────────────────────────────
-    // Saves current cursor character offset within a contentEditable element
+    // Improved saveSelection for contentEditable
     const saveSelection = (containerEl) => {
       const selection = window.getSelection();
       if (!selection || selection.rangeCount === 0) return 0;
+      
       const range = selection.getRangeAt(0);
       const preSelectionRange = range.cloneRange();
       preSelectionRange.selectNodeContents(containerEl);
       preSelectionRange.setEnd(range.startContainer, range.startOffset);
+      
       return preSelectionRange.toString().length;
     };
 
-    // Restores cursor to a specific character offset within a contentEditable element
+    // Improved restoreSelection with boundary checks and node traversal
     const restoreSelection = (containerEl, offset) => {
+      if (!containerEl) return;
+      
       let charCount = 0;
       const range = document.createRange();
-      range.setStart(containerEl, 0);
-      range.collapse(true);
-      const nodeStack = [containerEl];
-      let node, foundStart = false, stop = false;
-
-      while (!stop && (node = nodeStack.pop())) {
+      let found = false;
+      
+      function traverseNodes(node) {
+        if (found) return;
+        
         if (node.nodeType === 3) { // Text node
           const nextCharCount = charCount + node.length;
-          if (!foundStart && offset >= charCount && offset <= nextCharCount) {
+          if (offset >= charCount && offset <= nextCharCount) {
             range.setStart(node, offset - charCount);
             range.setEnd(node, offset - charCount);
-            foundStart = true;
-            stop = true;
+            found = true;
+            return;
           }
           charCount = nextCharCount;
         } else {
-          let i = node.childNodes.length;
-          while (i--) {
-            nodeStack.push(node.childNodes[i]);
+          for (let i = 0; i < node.childNodes.length; i++) {
+            traverseNodes(node.childNodes[i]);
+            if (found) return;
           }
         }
       }
+      
+      traverseNodes(containerEl);
+      
+      if (!found) {
+        // If not found, place at the end
+        range.selectNodeContents(containerEl);
+        range.collapse(false);
+      }
+      
       const selection = window.getSelection();
       selection.removeAllRanges();
       selection.addRange(range);
@@ -1280,6 +1292,10 @@
       const speechTimerRef = useRef({ totalChars: 0 });
       const audioContextRef = useRef(null);
       const readWordsTimeoutRef = useRef(null);
+      const isTypingRef = useRef(false);
+      const typingTimeoutRef = useRef(null);
+      const lastSelectionOffsetRef = useRef(0);
+      const [, setForceUpdate] = useState(0); // Para forçar re-renderização quando parar de digitar
 
       // Substituir setReadWords direto por uma versão com debounce para performance
       const updateReadWordsDebounced = useCallback((newReadWords) => {
@@ -1289,6 +1305,15 @@
         readWordsTimeoutRef.current = setTimeout(() => {
           setReadWords(newReadWords);
         }, 50); // Debounce de 50ms para reduzir thrashing no DOM
+      }, []);
+
+      // Cleanup for typing timeout
+      useEffect(() => {
+        return () => {
+          if (typingTimeoutRef.current) {
+            clearTimeout(typingTimeoutRef.current);
+          }
+        };
       }, []);
 
       // Memorização para evitar reprocessamento desnecessário
@@ -1628,6 +1653,10 @@
           setEditorHtml(renderedHtml);
           return;
         }
+
+        // Se o usuário está digitando, não atualiza o HTML para evitar conflitos de seleção e "pulos"
+        if (isTypingRef.current) return;
+
         const sourceTokens = wordSpansRef.current.length > 0 ? wordSpansRef.current : tokens;
         // Cursor fica na palavra ativa durante leitura; senão, na posição clicada
         const cursorIdx = (isPlaying || isPaused) ? currentWordIdx : cursorWordPos;
@@ -1635,32 +1664,59 @@
       }, [currentWordIdx, readWords, isPlaying, isPaused, text, tokens, colors, isRenderedMd, renderedHtml, cursorWordPos, buildHtmlWithCursor]);
 
       // %%SECTION: EFFECTS - Editor Content Sync & Selection Persistence
-      // Mantém o cursor no lugar certo após atualizações de HTML no contentEditable
+      // Gerencia o conteúdo do editor manualmente para evitar reset de cursor durante digitação
       useLayoutEffect(() => {
         if (isRenderedMd || !editorRef.current) return;
         
-        // Se o editor tem foco, salva e restaura a seleção
-        if (document.activeElement === editorRef.current) {
-          const offset = saveSelection(editorRef.current);
-          // Nota: O HTML já foi atualizado pelo React via dangerouslySetInnerHTML
-          // antes deste useLayoutEffect rodar (commit phase).
-          restoreSelection(editorRef.current, offset);
+        // Se o usuário está digitando, deixamos o navegador gerenciar o DOM nativamente
+        if (isTypingRef.current) return;
+
+        const el = editorRef.current;
+        const sourceTokens = wordSpansRef.current.length > 0 ? wordSpansRef.current : tokens;
+        const cursorIdx = (isPlaying || isPaused) ? currentWordIdx : cursorWordPos;
+        
+        // Reconstrói o HTML com destaques (highlights)
+        const newHtml = buildHtmlWithCursor(sourceTokens, cursorIdx);
+
+        // Só atualiza se o HTML for diferente, para evitar saltos desnecessários
+        if (el.innerHTML !== newHtml) {
+          // Se o editor tem foco, salva e restaura a seleção
+          const offset = document.activeElement === el ? saveSelection(el) : null;
+          el.innerHTML = newHtml;
+          if (offset !== null) {
+            restoreSelection(el, offset);
+          }
         }
-      }, [editorHtml, isRenderedMd]);
+      }, [currentWordIdx, readWords, isPlaying, isPaused, tokens, colors, cursorWordPos, isRenderedMd, buildHtmlWithCursor]);
 
       /**
        * Captura entrada do usuário no modo contentEditable.
-       * Sincroniza o estado 'text' com o conteúdo visível.
+       * Sincroniza o estado 'text' sem disparar reconstrução imediata do DOM.
        */
       const handleInput = useCallback((e) => {
         const el = e.currentTarget;
-        // innerText preserva quebras de linha melhor que textContent em contentEditable
         const newText = el.innerText;
         
-        // Sincroniza estado sem disparar re-renderização imediata do HTML interno
-        // se possível, mas como editorHtml depende de text, o React vai atualizar.
-        handleTextChange(newText);
-      }, [handleTextChange]);
+        // Marca que está digitando para bloquear updates de HTML via useLayoutEffect
+        isTypingRef.current = true;
+        
+        // Sincroniza estado para que outras partes (contadores, tabs) saibam do novo texto
+        setText(newText);
+        setIsDirty(true);
+        setReadWords(new Set());
+        wordSpansRef.current = [];
+
+        if (typingTimeoutRef.current) {
+          clearTimeout(typingTimeoutRef.current);
+        }
+        
+        // Após 400ms sem digitar, libera a atualização do HTML com highlights
+        typingTimeoutRef.current = setTimeout(() => {
+          isTypingRef.current = false;
+          // Força uma re-renderização para que o useLayoutEffect acima rode e aplique destaques
+          setForceUpdate(prev => prev + 1);
+        }, 400);
+      }, []);
 
       // %%SECTION: EFFECTS - Markdown Dropdown Close
       // (No effect needed - showMdDropdown is self-managed)
@@ -1722,19 +1778,15 @@
             activeTokenIdxRef.current = abs;
             setCurrentWordIdx(abs);
             
-            // Usa versão debounced para evitar re-renderizações excessivas via innerHTML
-            const next = new Set(readWords); // nota: capturado do estado; melhor usar prev em SetState
-            setReadWords(prev => {
-              const next = new Set(prev);
-              // Mantém TODOS os tokens já lidos + marca os novos até a posição atual
-              for (let k = readStartIdxRef.current; k <= abs; k++) {
-                if (/\S/.test(tokens[k])) next.add(k);
-              }
-              return next;
-            });
-            // Nota: Embora a instrução pedisse updateReadWordsDebounced, 
-            // o código acima usa setReadWords funcional. 
-            // Vamos trocar para a debounced conforme solicitado explicitamente:
+            // Calcula o novo Set de palavras lidas
+            const nextReadWords = new Set(readWords);
+            // Mantém o histórico existente e adiciona os novos tokens lidos desde o início da sessão atual
+            for (let k = readStartIdxRef.current; k <= abs; k++) {
+              if (/\S/.test(tokens[k])) nextReadWords.add(k);
+            }
+            
+            // Usa versão debounced para evitar re-renderizações (innerHTML) a cada palavra falada
+            updateReadWordsDebounced(nextReadWords);
           }
 
           // Real-time remaining time calculation via onboundary
@@ -1773,12 +1825,17 @@
         const editor = editorRef.current;
         if (!editor) return 0;
 
+        // Pega posição ATUAL do cursor no contentEditable
         const cursorCharPos = saveSelection(editor);
 
         let charCount = 0;
         for (let i = 0; i < tokens.length; i++) {
           charCount += tokens[i].length;
-          if (charCount > cursorCharPos) return i;
+          if (charCount > cursorCharPos) {
+            // Sincroniza cursorWordPos para que o feedback visual (karaoke-cursor) acompanhe
+            setCursorWordPos(i);
+            return i;
+          }
         }
         return tokens.length;
       }, [tokens]);
@@ -1792,15 +1849,19 @@
         if (!ttsSupported || !text.trim()) return;
         if (isPaused) { window.speechSynthesis.resume(); setIsPaused(false); setIsPlaying(true); return; }
 
+        // Pega posição ATUAL do cursor no momento do clique (garante leitura do ponto correto)
+        const currentCursorPos = getCursorTokenIndex();
+        
         // Inicia do cursor (cursorWordPos) ou do token atual se estiver lendo
-        const startIdx = (isPlaying || isPaused) ? currentWordIdx : cursorWordPos;
+        const startIdx = (isPlaying || isPaused) ? currentWordIdx : currentCursorPos;
+        
         activeTokenIdxRef.current = startIdx;
         readStartIdxRef.current = startIdx;
         // NÃO limpa readWords — mantém o histórico do que já foi lido
         setCurrentWordIdx(-1);
         playFromTokenIndex(startIdx, rate, pitch, volume, selectedVoice);
       }, [text, selectedVoice, rate, pitch, volume, isPaused, ttsSupported,
-          playFromTokenIndex, cursorWordPos, currentWordIdx, isPlaying]);
+          playFromTokenIndex, currentWordIdx, isPlaying, getCursorTokenIndex]);
 
       /**
        * Pauses TTS playback if currently playing.
@@ -2564,7 +2625,7 @@
                     outline: "none",
                     "--cursor-color": colors.textColor,
                   }}
-                  dangerouslySetInnerHTML={{ __html: editorHtml }}
+                  /* dangerouslySetInnerHTML removido para controle manual do DOM e evitar reset de cursor */
                 />
               )}
 
