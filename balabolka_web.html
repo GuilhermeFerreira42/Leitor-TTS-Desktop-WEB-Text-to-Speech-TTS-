@@ -262,8 +262,39 @@
       resize: none;
       outline: none;
       border: none;
-      line-height: 1.7;
+      /* line-height é controlado via fontSettings.lineHeight (estado React) */
       overflow-y: auto;
+      overflow-x: hidden;
+      scroll-behavior: smooth;
+      -webkit-overflow-scrolling: touch;
+      /* Força o navegador a respeitar o scroll da roda */
+      touch-action: pan-y;
+      overscroll-behavior: auto;
+    }
+
+    .editor-area.visual-layer {
+      overflow: hidden;
+      will-change: transform;
+    }
+
+    /* Cursor visual tipo barra de texto (karaoke) */
+    .karaoke-cursor {
+      display: inline;
+      position: relative;
+    }
+    .karaoke-cursor::after {
+      content: "";
+      position: absolute;
+      left: -1px;
+      top: 0;
+      bottom: 0;
+      width: 2px;
+      background-color: var(--cursor-color, #00ff66);
+      animation: karaoke-blink 1s steps(1) infinite;
+      pointer-events: none;
+    }
+    @keyframes karaoke-blink {
+      50% { opacity: 0; }
     }
 
     .slider-group {
@@ -620,7 +651,7 @@
   <div id="root"></div>
 
   <script type="text/babel">
-    const { useState, useEffect, useRef, useCallback, useMemo } = React;
+    const { useState, useEffect, useLayoutEffect, useRef, useCallback, useMemo } = React;
 
     // ─── Constants ────────────────────────────────────────────────────────────────
     const DEFAULT_COLORS = {
@@ -1162,9 +1193,9 @@
       const [pendingColors, setPendingColors] = useState(DEFAULT_COLORS);
       const [fontSettings, setFontSettings] = useState(() => {
         const saved = localStorage.getItem("balabolka_fontSettings");
-        return saved ? JSON.parse(saved) : { family: "Courier New", size: 14, bold: false, italic: false };
+        return saved ? JSON.parse(saved) : { family: "Courier New", size: 14, bold: false, italic: false, lineHeight: 1.4 };
       });
-      const [pendingFont, setPendingFont] = useState({ family: "Courier New", size: 14, bold: false, italic: false });
+      const [pendingFont, setPendingFont] = useState({ family: "Courier New", size: 14, bold: false, italic: false, lineHeight: 1.4 });
       const [showSavedNotif, setShowSavedNotif] = useState(false);
       const [isRenderedMd, setIsRenderedMd] = useState(() => {
         return localStorage.getItem("balabolka_isRenderedMd") === "true";
@@ -1199,13 +1230,15 @@
       // %%SECTION: REFS
       const wordSpansRef = useRef([]);
       const activeTokenIdxRef = useRef(0);
+      const readStartIdxRef = useRef(0); // índice do token onde a leitura começou
       const debounceTimerRef = useRef(null);
       const fileInputRef = useRef(null);
       const isEditingRef = useRef(false);
       const historyRef = useRef({});
       const undoRedoTimerRef = useRef(null);
-      const textareaRef = useRef(null);
+      const textareaRef = useRef(null); // mantido para compatibilidade com getCursorTokenIndex
       const speechTimerRef = useRef({ totalChars: 0 });
+      const audioContextRef = useRef(null);
 
       // Memorização para evitar reprocessamento desnecessário
       const plainText = useMemo(() => isRenderedMd ? stripMarkdown(text) : text, [text, isRenderedMd]);
@@ -1327,6 +1360,61 @@
         window.speechSynthesis.onvoiceschanged = () => requestIdleCallback(loadVoices);
         requestIdleCallback(loadVoices);
         return () => { window.speechSynthesis.onvoiceschanged = null; };
+      }, []);
+
+      // %%SECTION: EFFECTS - Audio Output Device Detection
+      // Verifica dispositivo de saída de áudio padrão
+      useEffect(() => {
+        if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) return;
+
+        const checkAudioOutput = async () => {
+          try {
+            const devices = await navigator.mediaDevices.enumerateDevices();
+            const audioOutputs = devices.filter(d => d.kind === 'audiooutput');
+            console.log('[Áudio] Dispositivos de saída disponíveis:', audioOutputs.map(d => d.label || d.deviceId));
+
+            // Tenta usar setSinkId se suportado (Chrome/Edge)
+            const testAudio = document.createElement('audio');
+            if (typeof testAudio.setSinkId === 'function') {
+              console.log('[Áudio] setSinkId suportado — usando dispositivo padrão do sistema');
+              // Não fixa deviceId — usa o padrão do sistema (o fone conectado)
+              // Isso força o navegador a respeitar a seleção do sistema operacional
+            } else {
+              console.warn('[Áudio] setSinkId não suportado neste navegador');
+            }
+          } catch (err) {
+            console.error('[Áudio] Erro ao listar dispositivos:', err);
+          }
+        };
+
+        // Listener para mudança de dispositivo (ex: conectar fone)
+        navigator.mediaDevices.addEventListener('devicechange', checkAudioOutput);
+        checkAudioOutput();
+
+        return () => {
+          navigator.mediaDevices.removeEventListener('devicechange', checkAudioOutput);
+        };
+      }, []);
+
+      // %%SECTION: EFFECTS - Audio Output Hint
+      useEffect(() => {
+        if (!('speechSynthesis' in window)) return;
+
+        // Verifica se há mudança de sink (hint visual)
+        const hasSinkControl = typeof HTMLAudioElement !== 'undefined' &&
+                              HTMLAudioElement.prototype.setSinkId;
+
+        if (!hasSinkControl) {
+          console.warn(
+            '%c[Balabolka] Dica de áudio',
+            'color: blue; font-weight: bold',
+            '\nSeu navegador não permite forçar dispositivo de saída via JS.',
+            '\nPara garantir que o áudio saia no fone de ouvido:',
+            '\n1. Desconecte e reconecte o fone de ouvido',
+            '\n2. Ou reinicie o Chrome (ele vai usar o sink padrão atual do sistema)',
+            '\n3. Verifique em chrome://settings/sound que o dispositivo correto está marcado'
+          );
+        }
       }, []);
 
       /**
@@ -1463,34 +1551,99 @@
         return () => clearTimeout(timer);
       }, [text, tabTexts]);
 
-      // Render highlights
+      /**
+       * Builds HTML with colored spans for read words, active word highlight,
+       * and a blinking cursor marker at cursorIdx.
+       */
+      const buildHtmlWithCursor = useCallback((sourceTokens, cursorIdx) => {
+        return sourceTokens.map((token, i) => {
+          if (!/\S/.test(token)) return token;
+          const isActive = i === currentWordIdx;
+          const isRead = readWords.has(i);
+          const isCursor = i === cursorIdx;
+          let style = `color:${colors.textColor};`;
+          if (isActive)
+            style = `background-color:${colors.highlightColor};color:#fff;font-weight:bold;padding:0 2px;border-radius:2px;`;
+          else if (isRead)
+            style = `color:${colors.readColor};`;
+          const cls = [(isActive ? "active-word" : ""), (isCursor && !isActive ? "karaoke-cursor" : "")].filter(Boolean).join(" ");
+          return `<span class="${cls}" style="${style}" data-token-idx="${i}">${token}</span>`;
+        }).join("");
+      }, [currentWordIdx, readWords, colors]);
+
+      // Render highlights (with always-visible cursor)
       useEffect(() => {
         if (isRenderedMd) {
           setEditorHtml(renderedHtml);
           return;
         }
-        if (!isPlaying && !isPaused) { setEditorHtml(text); return; }
-        const parts = wordSpansRef.current;
-        const html = parts.map((token, i) => {
-          if (!/\S/.test(token)) return token;
-          let style = `color:${colors.textColor};`;
-          if (i === currentWordIdx)
-            style = `background-color:${colors.highlightColor};color:#fff;font-weight:bold;padding:0 2px;border-radius:2px;`;
-          else if (readWords.has(i))
-            style = `color:${colors.readColor};`;
-          return `<span class="${i === currentWordIdx ? "active-word" : ""}" style="${style}">${token}</span>`;
-        }).join("");
-        setEditorHtml(html);
-      }, [currentWordIdx, readWords, isPlaying, isPaused, text, colors, isRenderedMd, renderedHtml]);
+        const sourceTokens = wordSpansRef.current.length > 0 ? wordSpansRef.current : tokens;
+        // Cursor fica na palavra ativa durante leitura; senão, na posição clicada
+        const cursorIdx = (isPlaying || isPaused) ? currentWordIdx : cursorWordPos;
+        setEditorHtml(buildHtmlWithCursor(sourceTokens, cursorIdx));
+      }, [currentWordIdx, readWords, isPlaying, isPaused, text, tokens, colors, isRenderedMd, renderedHtml, cursorWordPos, buildHtmlWithCursor]);
 
       // %%SECTION: EFFECTS - UI Sync
-      // Auto-scroll to active word
+      // Auto-scroll to active word (com margem para não colar no topo/fundo)
       useEffect(() => {
         if ((isPlaying || isPaused) && editorRef.current) {
           const el = editorRef.current.querySelector(".active-word");
-          if (el) el.scrollIntoView({ block: "center", behavior: "smooth" });
+          if (el) {
+            // Calcula posição considerando o container com offset
+            const container = editorRef.current;
+            const elTop = el.offsetTop;
+            const elHeight = el.offsetHeight;
+            const containerHeight = container.clientHeight;
+            const currentScroll = container.scrollTop;
+            const targetScroll = elTop - (containerHeight / 2) + (elHeight / 2);
+
+            container.scrollTo({
+              top: targetScroll,
+              behavior: "smooth"
+            });
+          }
         }
       }, [currentWordIdx, isPlaying, isPaused]);
+
+      // %%SECTION: EFFECTS - Scroll Sync
+      // Sincroniza rolagem entre textarea e camada visual (karaoke)
+      useEffect(() => {
+        // Só necessário no modo karaoke (quando há textarea sobreposto)
+        if (isRenderedMd) return;
+        
+        const textarea = textareaRef.current;
+        const visual = editorRef.current;
+        
+        if (!textarea || !visual) return;
+        
+        let isSyncing = false;
+        
+        const syncScroll = () => {
+          if (isSyncing) return;
+          isSyncing = true;
+          // Sincroniza visual com textarea usando transform para evitar ghosting
+          visual.style.transform = `translateY(-${textarea.scrollTop}px) translateX(-${textarea.scrollLeft}px)`;
+          requestAnimationFrame(() => {
+            isSyncing = false;
+          });
+        };
+        
+        // Apenas textarea deve ter listener de scroll!
+        textarea.addEventListener('scroll', syncScroll, { passive: true });
+        
+        return () => {
+          textarea.removeEventListener('scroll', syncScroll);
+        };
+      }, [isRenderedMd]);
+
+      // %%SECTION: EFFECTS - Scroll Preservation
+      // Preserva a posição do scroll da camada visual durante atualizações de conteúdo
+      useLayoutEffect(() => {
+        if (editorRef.current && textareaRef.current && !isRenderedMd) {
+          const t = textareaRef.current;
+          editorRef.current.style.transform = `translateY(-${t.scrollTop}px) translateX(-${t.scrollLeft}px)`;
+        }
+      }, [editorHtml, isRenderedMd]);
 
 
 
@@ -1508,6 +1661,7 @@
        * @param {SpeechSynthesisVoice|null} curVoice - Selected voice
        */
       const playFromTokenIndex = useCallback((startIdx, curRate, curPitch, curVol, curVoice) => {
+        // Áudio roteado automaticamente para o dispositivo padrão do sistema via Web Speech API
         window.speechSynthesis.cancel();
         wordSpansRef.current = tokens;
         const remaining = tokens.slice(startIdx);
@@ -1515,6 +1669,22 @@
         if (!remainingText.trim()) {
           setIsPlaying(false); setIsPaused(false);
           setCurrentWordIdx(-1); setReadWords(new Set()); return;
+        }
+
+        // Inicializa AudioContext para "forçar" o navegador a usar o dispositivo padrão do sistema
+        try {
+          const AudioContext = window.AudioContext || window.webkitAudioContext;
+          if (AudioContext) {
+            if (!audioContextRef.current) {
+              audioContextRef.current = new AudioContext();
+            }
+            // Resume se suspenso (política de autoplay)
+            if (audioContextRef.current.state === 'suspended') {
+              audioContextRef.current.resume();
+            }
+          }
+        } catch (e) {
+          console.warn('[Áudio] Não foi possível inicializar AudioContext:', e);
         }
 
         // Initialize timer ref for real-time remaining calculation
@@ -1538,7 +1708,10 @@
             setCurrentWordIdx(abs);
             setReadWords(prev => {
               const next = new Set(prev);
-              for (let k = 0; k < abs; k++) if (/\S/.test(tokens[k])) next.add(k);
+              // Mantém TODOS os tokens já lidos + marca os novos até a posição atual
+              for (let k = readStartIdxRef.current; k <= abs; k++) {
+                if (/\S/.test(tokens[k])) next.add(k);
+              }
               return next;
             });
           }
@@ -1558,7 +1731,11 @@
         };
         utter.onend = () => {
           setIsPlaying(false); setIsPaused(false);
-          setCurrentWordIdx(-1); setReadWords(new Set()); wordSpansRef.current = [];
+          setCurrentWordIdx(-1);
+          // Salva onde parou para o cursor ficar posicionado lá
+          if (activeTokenIdxRef.current >= 0) {
+            setCursorWordPos(activeTokenIdxRef.current);
+          }
         };
         utter.onerror = e => { if (e.error !== "interrupted") { setIsPlaying(false); setIsPaused(false); } };
         window.speechSynthesis.speak(utter);
@@ -1595,12 +1772,15 @@
         if (!ttsSupported || !text.trim()) return;
         if (isPaused) { window.speechSynthesis.resume(); setIsPaused(false); setIsPlaying(true); return; }
 
-        // Check for cursor position or selection
-        const startIdx = getCursorTokenIndex();
+        // Inicia do cursor (cursorWordPos) ou do token atual se estiver lendo
+        const startIdx = (isPlaying || isPaused) ? currentWordIdx : cursorWordPos;
         activeTokenIdxRef.current = startIdx;
-        setReadWords(new Set()); setCurrentWordIdx(-1);
+        readStartIdxRef.current = startIdx;
+        // NÃO limpa readWords — mantém o histórico do que já foi lido
+        setCurrentWordIdx(-1);
         playFromTokenIndex(startIdx, rate, pitch, volume, selectedVoice);
-      }, [text, selectedVoice, rate, pitch, volume, isPaused, ttsSupported, playFromTokenIndex, getCursorTokenIndex]);
+      }, [text, selectedVoice, rate, pitch, volume, isPaused, ttsSupported,
+          playFromTokenIndex, cursorWordPos, currentWordIdx, isPlaying]);
 
       /**
        * Pauses TTS playback if currently playing.
@@ -1615,10 +1795,12 @@
       const handleStop = useCallback(() => {
         window.speechSynthesis.cancel();
         setIsPlaying(false); setIsPaused(false);
-        setCurrentWordIdx(-1); setReadWords(new Set());
-        wordSpansRef.current = []; setEditorHtml(text);
-        setCursorWordPos(0);
-      }, [text]);
+        setCurrentWordIdx(-1);
+        // Salva onde parou para o cursor ficar visível lá
+        if (activeTokenIdxRef.current >= 0) {
+          setCursorWordPos(activeTokenIdxRef.current);
+        }
+      }, []);
 
       // %%SECTION: EFFECTS - Debounced Parameter Sync
       // Debounced live param update
@@ -1780,6 +1962,10 @@
         setText(newText);
         setIsDirty(true);
         isEditingRef.current = true;
+        // Limpa destaques de leitura quando o texto é editado
+        setReadWords(new Set());
+        readStartIdxRef.current = 0;
+        wordSpansRef.current = [];
 
         if (undoRedoTimerRef.current) clearTimeout(undoRedoTimerRef.current);
         const tabIdx = activeTab;
@@ -2334,7 +2520,9 @@
           {/* Main Area */}
           <div className="main-area">
             <div className="editor-container">
-              {(isPlaying || isPaused || isRenderedMd) ? (
+              {/* Editor unificado — sempre renderizado com spans e cursor visível */}
+              {isRenderedMd ? (
+                /* Modo Markdown renderizado: apenas leitura, sem cursor karaoke */
                 <div
                   ref={editorRef}
                   className="editor-area"
@@ -2343,32 +2531,63 @@
                     fontFamily: fontSettings.family, fontSize: `${zoomedFontSize}px`,
                     fontWeight: fontSettings.bold ? "bold" : "normal",
                     fontStyle: fontSettings.italic ? "italic" : "normal",
-                    whiteSpace: isRenderedMd ? "normal" : "pre-wrap", wordBreak: "break-word", userSelect: "text",
+                    lineHeight: fontSettings.lineHeight || 1.4,
+                    whiteSpace: "normal", wordBreak: "break-word", userSelect: "text",
+                    "--cursor-color": colors.textColor,
                   }}
                   dangerouslySetInnerHTML={{ __html: editorHtml }}
-                  onClick={handleCursorMove}
-                  onKeyUp={handleCursorMove}
-                  onSelect={handleCursorMove}
+                  onClick={e => { handleCursorMove(); if (isPlaying || isPaused) handleStop(); }}
                 />
               ) : (
-                <textarea
-                  ref={textareaRef}
-                  className="editor-area"
-                  style={{
-                    backgroundColor: colors.bgColor, color: colors.textColor,
-                    fontFamily: fontSettings.family, fontSize: `${zoomedFontSize}px`,
-                    fontWeight: fontSettings.bold ? "bold" : "normal",
-                    fontStyle: fontSettings.italic ? "italic" : "normal",
-                    caretColor: colors.textColor,
-                  }}
-                  value={text}
-                  onChange={e => handleTextChange(e.target.value)}
-                  placeholder="Digite, cole ou arraste um arquivo (PDF, TXT, HTML) aqui..."
-                  spellCheck={false}
-                  onClick={handleCursorMove}
-                  onKeyUp={handleCursorMove}
-                  onSelect={handleCursorMove}
-                />
+                /* Modo texto: editor karaoke com cursor piscante e edição via textarea sobreposta */
+                <div style={{ position: "relative", width: "100%", height: "100%" }}>
+                  {/* Camada visual: spans com destaques e cursor karaoke */}
+                  <div
+                    ref={editorRef}
+                    className="editor-area visual-layer"
+                    style={{
+                      position: "absolute", inset: 0,
+                      backgroundColor: colors.bgColor, color: colors.textColor,
+                      fontFamily: fontSettings.family, fontSize: `${zoomedFontSize}px`,
+                      fontWeight: fontSettings.bold ? "bold" : "normal",
+                      fontStyle: fontSettings.italic ? "italic" : "normal",
+                      lineHeight: fontSettings.lineHeight || 1.4,
+                      whiteSpace: "pre-wrap", wordBreak: "break-word",
+                      pointerEvents: "none", userSelect: "none",
+                      "--cursor-color": colors.textColor,
+                    }}
+                    dangerouslySetInnerHTML={{ __html: editorHtml }}
+                  />
+                  {/* Camada de interação: textarea transparente sobre a camada visual */}
+                  <textarea
+                    ref={textareaRef}
+                    className="editor-area"
+                    style={{
+                      position: "absolute", inset: 0,
+                      backgroundColor: "transparent",
+                      color: "transparent",
+                      caretColor: isPlaying || isPaused ? "transparent" : colors.textColor,
+                      fontFamily: fontSettings.family, fontSize: `${zoomedFontSize}px`,
+                      fontWeight: fontSettings.bold ? "bold" : "normal",
+                      fontStyle: fontSettings.italic ? "italic" : "normal",
+                      lineHeight: fontSettings.lineHeight || 1.4,
+                      resize: "none", border: "none", outline: "none",
+                      zIndex: 2,
+                    }}
+                    value={text}
+                    onChange={e => handleTextChange(e.target.value)}
+                    placeholder=""
+                    spellCheck={false}
+                    onClick={e => {
+                      // Atualiza posição do cursor e para leitura se ativa
+                      handleCursorMove();
+                      if (isPlaying || isPaused) handleStop();
+                    }}
+                    onKeyUp={handleCursorMove}
+                    onSelect={handleCursorMove}
+                    onDoubleClick={() => handlePlay()}
+                  />
+                </div>
               )}
 
               {!ttsSupported && (
@@ -2430,6 +2649,7 @@
                   backgroundColor: pendingColors.bgColor, color: pendingColors.textColor,
                   fontFamily: pendingFont.family, fontSize: `${pendingFont.size}px`,
                   fontWeight: pendingFont.bold ? "bold" : "normal", fontStyle: pendingFont.italic ? "italic" : "normal",
+                  lineHeight: pendingFont.lineHeight || 1.4,
                 }}>
                   <span>Texto normal </span>
                   <span style={{ color: pendingColors.readColor }}>Texto lido </span>
@@ -2538,6 +2758,22 @@
                     <input type="checkbox" checked={pendingFont.italic} onChange={e => setPendingFont({ ...pendingFont, italic: e.target.checked })} />
                     <em>Itálico</em>
                   </label>
+                </div>
+                {/* Controle de espaçamento entre linhas */}
+                <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                  <label style={{ fontSize: 12, fontWeight: "bold" }}>Espaçamento entre linhas:</label>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    <input
+                      type="range"
+                      min={1.0} max={3.0} step={0.1}
+                      value={pendingFont.lineHeight || 1.4}
+                      onChange={e => setPendingFont({ ...pendingFont, lineHeight: Number(e.target.value) })}
+                      style={{ flex: 1 }}
+                    />
+                    <span style={{ fontSize: 12, fontWeight: "bold", fontFamily: "monospace", minWidth: 30 }}>
+                      {(pendingFont.lineHeight || 1.4).toFixed(1)}
+                    </span>
+                  </div>
                 </div>
                 <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
                   <ColorRow label="Cor do texto" value={pendingColors.textColor} onChange={v => setPendingColors({ ...pendingColors, textColor: v })} />
@@ -2708,6 +2944,10 @@
     }
 
     ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+  </script>
+</body>
+
+</html>).render(<App />);
   </script>
 </body>
 
