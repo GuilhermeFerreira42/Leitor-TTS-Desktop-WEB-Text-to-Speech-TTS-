@@ -278,7 +278,9 @@
     readingStartIdx: 0,
     currentTokenIdx: -1,
     originalMdTexts: LS.get('balabolka_originalMdTexts', []),
-    isRenderedMd: false
+    isRenderedMd: false,
+    // === NOVO: controle do keep-alive timer ===
+    keepAliveTimer: null
   };
 
   // === DOM refs ===
@@ -378,12 +380,74 @@
     return text.split(/(\s+)/);
   }
 
+  // =====================================================================
+  // === NOVO: Divide texto em chunks em pontos naturais de pontuação  ===
+  // =====================================================================
+  function splitTextIntoChunks(text, maxLen) {
+    maxLen = maxLen || 3000;
+    const chunks = [];
+    let remaining = text;
+
+    while (remaining.length > 0) {
+      if (remaining.length <= maxLen) {
+        chunks.push(remaining);
+        break;
+      }
+
+      // Procura o último ponto de quebra natural dentro do limite
+      let cutAt = -1;
+      const breakChars = ['.', '!', '?', ';', '\n', ','];
+      for (let b = 0; b < breakChars.length; b++) {
+        const idx = remaining.lastIndexOf(breakChars[b], maxLen);
+        if (idx > cutAt) cutAt = idx;
+      }
+
+      // Se não encontrou ponto natural, procura espaço
+      if (cutAt <= 0) {
+        cutAt = remaining.lastIndexOf(' ', maxLen);
+      }
+
+      // Se ainda não encontrou, corta no limite
+      if (cutAt <= 0) {
+        cutAt = maxLen;
+      }
+
+      chunks.push(remaining.substring(0, cutAt + 1));
+      remaining = remaining.substring(cutAt + 1);
+    }
+
+    return chunks;
+  }
+
+  // =====================================================================
+  // === NOVO: Para e limpa o keep-alive timer com segurança           ===
+  // =====================================================================
+  function clearKeepAlive() {
+    if (state.keepAliveTimer) {
+      clearInterval(state.keepAliveTimer);
+      state.keepAliveTimer = null;
+    }
+  }
+
+  // =====================================================================
+  // === NOVO: Inicia o keep-alive timer para evitar cancelamento      ===
+  //           automático do Chrome/Edge em textos longos              ===
+  // =====================================================================
+  function startKeepAlive() {
+    clearKeepAlive();
+    state.keepAliveTimer = setInterval(function() {
+      if (window.speechSynthesis.speaking && !window.speechSynthesis.paused) {
+        window.speechSynthesis.pause();
+        window.speechSynthesis.resume();
+      }
+    }, 5000);
+  }
+
   // === TTS ===
   function getPlainText() {
     return state.isRenderedMd ? stripMarkdown(state.texts[state.activeTab] || '') : state.texts[state.activeTab] || '';
   }
 
-  // *** CORREÇÃO: removido editor.focus() para preservar a posição do cursor ***
   function getCursorOffset() {
     const sel = window.getSelection();
     if (!sel.rangeCount) return 0;
@@ -407,7 +471,6 @@
       charCount += node.length;
     }
 
-    // Fallback: range.startContainer não é nó de texto (ex.: cursor em <br>)
     const pre = document.createRange();
     pre.selectNodeContents(editor);
     pre.setEnd(range.startContainer, range.startOffset);
@@ -437,11 +500,12 @@
     applyEditorStyles();
     const first = editor.querySelector('.token.active');
     if (first) {
-      setTimeout(() => first.scrollIntoView({ block: 'nearest', behavior: 'auto' }), 0);
+      setTimeout(function() { first.scrollIntoView({ block: 'nearest', behavior: 'auto' }); }, 0);
     }
   }
 
   function restoreEditorMode() {
+    clearKeepAlive(); // === NOVO: limpa timer ao restaurar ===
     state.isPlaying = false;
     state.isPaused = false;
     state.currentTokenIdx = -1;
@@ -469,7 +533,7 @@
       }
     }
     const all = editor.querySelectorAll('.token');
-    all.forEach(span => {
+    all.forEach(function(span) {
       const i = parseInt(span.dataset.idx);
       if (i < idx && !span.classList.contains('read')) span.classList.add('read');
     });
@@ -479,20 +543,20 @@
 
   // === Voice picker ===
   function updateVoicePickerDisplay() {
-    const voice = state.voices.find(v => v.name === state.selectedVoiceName);
+    const voice = state.voices.find(function(v) { return v.name === state.selectedVoiceName; });
     voicePickerDisplay.textContent = voice ? (voice.name + ' [' + voice.lang + ']') : 'Selecione uma voz...';
   }
 
   function renderVoicePicker(filter) {
     voicePickerList.innerHTML = '';
     const f = (filter || '').toLowerCase().trim();
-    const filtered = f ? state.voices.filter(v => (v.name + ' ' + v.lang).toLowerCase().includes(f)) : state.voices;
+    const filtered = f ? state.voices.filter(function(v) { return (v.name + ' ' + v.lang).toLowerCase().includes(f); }) : state.voices;
     if (!filtered.length) {
       voicePickerList.innerHTML = '<div class="voice-no-results">Nenhuma voz encontrada</div>';
       return;
     }
     const groups = {};
-    filtered.forEach(v => {
+    filtered.forEach(function(v) {
       const prefix = v.lang.split('-')[0];
       if (!groups[prefix]) groups[prefix] = [];
       groups[prefix].push(v);
@@ -500,20 +564,20 @@
     const sortedPrefixes = Object.keys(groups).sort();
     const priority = ['pt', 'en', 'es'];
     const ordered = [];
-    priority.forEach(p => { if (groups[p]) ordered.push(p); });
-    sortedPrefixes.forEach(p => { if (!priority.includes(p)) ordered.push(p); });
+    priority.forEach(function(p) { if (groups[p]) ordered.push(p); });
+    sortedPrefixes.forEach(function(p) { if (!priority.includes(p)) ordered.push(p); });
 
-    ordered.forEach(prefix => {
+    ordered.forEach(function(prefix) {
       const label = document.createElement('div');
       label.className = 'voice-group-label';
       const langNames = { pt:'Português', en:'Inglês', es:'Espanhol', fr:'Francês', de:'Alemão', it:'Italiano', ja:'Japonês', ko:'Coreano', zh:'Chinês', ru:'Russo', ar:'Árabe', hi:'Hindi' };
       label.textContent = (langNames[prefix] || prefix.toUpperCase()) + ' (' + groups[prefix].length + ')';
       voicePickerList.appendChild(label);
-      groups[prefix].forEach(v => {
+      groups[prefix].forEach(function(v) {
         const opt = document.createElement('div');
         opt.className = 'voice-option' + (v.name === state.selectedVoiceName ? ' selected' : '');
         opt.innerHTML = '<span>' + escapeHtml(v.name) + '</span><span class="lang-tag">' + v.lang + '</span>';
-        opt.onclick = () => {
+        opt.onclick = function() {
           state.selectedVoiceName = v.name;
           LS.set('balabolka_voice', v.name);
           updateVoicePickerDisplay();
@@ -526,7 +590,7 @@
     });
   }
 
-  voicePickerDisplay.onclick = e => {
+  voicePickerDisplay.onclick = function(e) {
     e.stopPropagation();
     const showing = voicePickerDropdown.style.display === 'block';
     voicePickerDropdown.style.display = showing ? 'none' : 'block';
@@ -537,9 +601,9 @@
     }
   };
 
-  voiceSearchInput.oninput = () => renderVoicePicker(voiceSearchInput.value);
+  voiceSearchInput.oninput = function() { renderVoicePicker(voiceSearchInput.value); };
 
-  document.addEventListener('mousedown', e => {
+  document.addEventListener('mousedown', function(e) {
     if (!e.target.closest('#voice-picker-wrap')) {
       voicePickerDropdown.style.display = 'none';
     }
@@ -549,9 +613,9 @@
     if (!window.speechSynthesis) return;
     const v = window.speechSynthesis.getVoices();
     if (!v.length) return;
-    state.voices = [...v.filter(x => x.lang.startsWith('pt')), ...v.filter(x => !x.lang.startsWith('pt'))];
-    if (!state.selectedVoiceName || !state.voices.find(v => v.name === state.selectedVoiceName)) {
-      const def = state.voices.find(v => v.lang.startsWith('pt')) || state.voices[0];
+    state.voices = [...v.filter(function(x) { return x.lang.startsWith('pt'); }), ...v.filter(function(x) { return !x.lang.startsWith('pt'); })];
+    if (!state.selectedVoiceName || !state.voices.find(function(v) { return v.name === state.selectedVoiceName; })) {
+      const def = state.voices.find(function(v) { return v.lang.startsWith('pt'); }) || state.voices[0];
       if (def) state.selectedVoiceName = def.name;
     }
     updateVoicePickerDisplay();
@@ -566,24 +630,36 @@
     $('no-tts').style.display = 'flex';
   }
 
+  // =====================================================================
+  // === stopSpeech: limpa keep-alive antes de cancelar               ===
+  // =====================================================================
   function stopSpeech() {
+    clearKeepAlive(); // === NOVO ===
     if (window.speechSynthesis) window.speechSynthesis.cancel();
     restoreEditorMode();
   }
 
+  // =====================================================================
+  // === playSpeech: usa chunking + keep-alive para leitura contínua  ===
+  // =====================================================================
   function playSpeech() {
     if (!state.ttsSupported) return;
     if (state.isPaused) {
       window.speechSynthesis.resume();
-      state.isPaused = false; state.isPlaying = true;
-      updatePlayButton(); updateStatus();
+      startKeepAlive(); // === NOVO: retoma o keep-alive ao despausar ===
+      state.isPaused = false;
+      state.isPlaying = true;
+      updatePlayButton();
+      updateStatus();
       return;
     }
+
     // Captura posição do cursor ANTES de interromper a fala
     const cursorOffset = getCursorOffset();
     stopSpeech();
     const text = getPlainText();
     if (!text.trim()) return;
+
     const allTokens = tokenize(text);
     const startIdx = findStartToken(allTokens, cursorOffset);
     const remainingText = allTokens.slice(startIdx).join('');
@@ -594,11 +670,10 @@
     state.isPlaying = true;
     renderReadingMode(allTokens, startIdx);
 
-    const utter = new SpeechSynthesisUtterance(remainingText);
-    const voice = state.voices.find(v => v.name === state.selectedVoiceName) || state.voices.find(v => v.lang.startsWith('pt')) || state.voices[0];
-    if (voice) { utter.voice = voice; utter.lang = voice.lang; }
-    utter.rate = state.rate; utter.pitch = state.pitch; utter.volume = state.volume;
+    // === NOVO: divide o texto em chunks para leitura contínua ===
+    const chunks = splitTextIntoChunks(remainingText, 3000);
 
+    // Mapa de tokens com posição de caractere acumulada
     let charCount = 0;
     const tokenMap = [];
     for (let i = startIdx; i < allTokens.length; i++) {
@@ -606,72 +681,229 @@
       charCount += allTokens[i].length;
     }
 
+    let globalCharOffset = 0; // offset acumulado de chunks já lidos
     let lastTokenIdx = -1;
-    utter.onboundary = (e) => {
-      if (e.name !== 'word') return;
-      let activeIdx = -1;
-      for (let t = 0; t < tokenMap.length; t++) {
-        if (e.charIndex >= tokenMap[t].start && e.charIndex < tokenMap[t].end) {
-          activeIdx = tokenMap[t].idx; break;
+
+    // === NOVO: função recursiva que fala um chunk e encadeia o próximo ===
+    function speakChunk(chunkIndex) {
+      // Se acabou todos os chunks ou o usuário parou: encerra
+      if (chunkIndex >= chunks.length || !state.isPlaying) {
+        restoreEditorMode();
+        return;
+      }
+
+      const chunk = chunks[chunkIndex];
+      const utter = new SpeechSynthesisUtterance(chunk);
+      const voice = state.voices.find(function(v) { return v.name === state.selectedVoiceName; })
+                    || state.voices.find(function(v) { return v.lang.startsWith('pt'); })
+                    || state.voices[0];
+      if (voice) { utter.voice = voice; utter.lang = voice.lang; }
+      utter.rate   = state.rate;
+      utter.pitch  = state.pitch;
+      utter.volume = state.volume;
+
+      const chunkOffset = globalCharOffset;
+
+      // === NOVO: inicia keep-alive quando o chunk começa a ser falado ===
+      utter.onstart = function() {
+        startKeepAlive();
+      };
+
+      utter.onboundary = function(e) {
+        if (e.name !== 'word') return;
+        const absCharIndex = chunkOffset + e.charIndex;
+        let activeIdx = -1;
+        for (let t = 0; t < tokenMap.length; t++) {
+          if (absCharIndex >= tokenMap[t].start && absCharIndex < tokenMap[t].end) {
+            activeIdx = tokenMap[t].idx;
+            break;
+          }
         }
-      }
-      if (activeIdx !== -1 && activeIdx !== lastTokenIdx) {
-        lastTokenIdx = activeIdx;
-        highlightToken(activeIdx);
-      }
-    };
+        if (activeIdx !== -1 && activeIdx !== lastTokenIdx) {
+          lastTokenIdx = activeIdx;
+          highlightToken(activeIdx);
+        }
+      };
 
-    utter.onend = () => restoreEditorMode();
-    utter.onerror = (e) => { if (e.error !== 'interrupted' && e.error !== 'canceled') restoreEditorMode(); };
+      // === NOVO: ao terminar um chunk, encadeia automaticamente o próximo ===
+      utter.onend = function() {
+        clearKeepAlive();
+        globalCharOffset += chunk.length;
+        speakChunk(chunkIndex + 1);
+      };
 
-    window.speechSynthesis.speak(utter);
-    state.currentUtterance = utter;
-    updatePlayButton(); updateStatus();
+      utter.onerror = function(e) {
+        clearKeepAlive();
+        if (e.error !== 'interrupted' && e.error !== 'canceled') {
+          restoreEditorMode();
+        }
+      };
+
+      window.speechSynthesis.speak(utter);
+      state.currentUtterance = utter;
+    }
+
+    speakChunk(0); // Começa pelo primeiro chunk
+    updatePlayButton();
+    updateStatus();
   }
 
+  // =====================================================================
+  // === pauseSpeech: para o keep-alive durante a pausa               ===
+  // =====================================================================
   function pauseSpeech() {
     if (!state.ttsSupported || !state.isPlaying || state.isPaused) return;
+    clearKeepAlive(); // === NOVO: para o keep-alive durante a pausa ===
     window.speechSynthesis.pause();
-    state.isPaused = true; state.isPlaying = false;
-    updatePlayButton(); updateStatus();
+    state.isPaused = true;
+    state.isPlaying = false;
+    updatePlayButton();
+    updateStatus();
+  }
+
+  // =====================================================================
+  // === reapplySpeechIfPlaying: também usa keep-alive               ===
+  // =====================================================================
+  function reapplySpeechIfPlaying() {
+    if (!state.ttsSupported || !state.isPlaying || state.isPaused) return;
+
+    clearKeepAlive(); // === NOVO: limpa o timer antigo antes de reiniciar ===
+    if (window.speechSynthesis) {
+      window.speechSynthesis.cancel();
+    }
+
+    const startIdx = state.currentTokenIdx >= 0 ? state.currentTokenIdx : state.readingStartIdx;
+    const remainingText = state.readingTokens.slice(startIdx).join('');
+    if (!remainingText.trim()) return;
+
+    // === NOVO: também usa chunks ao reaplicar ===
+    const chunks = splitTextIntoChunks(remainingText, 3000);
+
+    let charCount = 0;
+    const tokenMap = [];
+    for (let i = startIdx; i < state.readingTokens.length; i++) {
+      tokenMap.push({ start: charCount, end: charCount + state.readingTokens[i].length, idx: i });
+      charCount += state.readingTokens[i].length;
+    }
+
+    let globalCharOffset = 0;
+    let lastTokenIdx = -1;
+
+    function speakChunk(chunkIndex) {
+      if (chunkIndex >= chunks.length || !state.isPlaying) {
+        restoreEditorMode();
+        return;
+      }
+
+      const chunk = chunks[chunkIndex];
+      const utter = new SpeechSynthesisUtterance(chunk);
+      const voice = state.voices.find(function(v) { return v.name === state.selectedVoiceName; })
+                    || state.voices.find(function(v) { return v.lang.startsWith('pt'); })
+                    || state.voices[0];
+      if (voice) { utter.voice = voice; utter.lang = voice.lang; }
+      utter.rate   = state.rate;
+      utter.pitch  = state.pitch;
+      utter.volume = state.volume;
+
+      const chunkOffset = globalCharOffset;
+
+      utter.onstart = function() {
+        startKeepAlive(); // === NOVO ===
+      };
+
+      utter.onboundary = function(e) {
+        if (e.name !== 'word') return;
+        const absCharIndex = chunkOffset + e.charIndex;
+        let activeIdx = -1;
+        for (let t = 0; t < tokenMap.length; t++) {
+          if (absCharIndex >= tokenMap[t].start && absCharIndex < tokenMap[t].end) {
+            activeIdx = tokenMap[t].idx;
+            break;
+          }
+        }
+        if (activeIdx !== -1 && activeIdx !== lastTokenIdx) {
+          lastTokenIdx = activeIdx;
+          highlightToken(activeIdx);
+        }
+      };
+
+      utter.onend = function() {
+        clearKeepAlive(); // === NOVO ===
+        globalCharOffset += chunk.length;
+        speakChunk(chunkIndex + 1);
+      };
+
+      utter.onerror = function(e) {
+        clearKeepAlive(); // === NOVO ===
+        if (e.error !== 'interrupted' && e.error !== 'canceled') {
+          restoreEditorMode();
+        }
+      };
+
+      window.speechSynthesis.speak(utter);
+      state.currentUtterance = utter;
+    }
+
+    speakChunk(0);
   }
 
   function updatePlayButton() {
     const btn = $('btn-play-big');
-    if (state.isPlaying) { btn.textContent = '⏹ Parar'; btn.className = 'play-stop-btn stop'; btn.onclick = stopSpeech; }
-    else if (state.isPaused) { btn.textContent = '▶ Continuar'; btn.className = 'play-stop-btn play'; btn.onclick = playSpeech; }
-    else { btn.textContent = '▶ Ler'; btn.className = 'play-stop-btn play'; btn.onclick = playSpeech; }
+    if (state.isPlaying) {
+      btn.textContent = '⏹ Parar';
+      btn.className = 'play-stop-btn stop';
+      btn.onclick = stopSpeech;
+    } else if (state.isPaused) {
+      btn.textContent = '▶ Continuar';
+      btn.className = 'play-stop-btn play';
+      btn.onclick = playSpeech;
+    } else {
+      btn.textContent = '▶ Ler';
+      btn.className = 'play-stop-btn play';
+      btn.onclick = playSpeech;
+    }
   }
   updatePlayButton();
 
   // === Tabs ===
   function renderTabs() {
     tabbar.innerHTML = '';
-    state.tabs.forEach((tab, i) => {
+    state.tabs.forEach(function(tab, i) {
       const div = document.createElement('div');
       div.className = 'tab-item' + (i === state.activeTab ? ' active' : '');
       if (state.renaming === i) {
-        const inp = document.createElement('input'); inp.className = 'tab-input'; inp.value = tab; inp.autofocus = true;
-        inp.onblur = () => { if (inp.value.trim()) state.tabs[i] = inp.value.trim(); state.renaming = -1; renderTabs(); updateTitle(); };
-        inp.onkeydown = e => { if (e.key === 'Enter') inp.blur(); if (e.key === 'Escape') { state.renaming = -1; renderTabs(); } };
+        const inp = document.createElement('input');
+        inp.className = 'tab-input';
+        inp.value = tab;
+        inp.autofocus = true;
+        inp.onblur = function() { if (inp.value.trim()) state.tabs[i] = inp.value.trim(); state.renaming = -1; renderTabs(); updateTitle(); };
+        inp.onkeydown = function(e) { if (e.key === 'Enter') inp.blur(); if (e.key === 'Escape') { state.renaming = -1; renderTabs(); } };
         div.appendChild(inp);
       } else {
         const span = document.createElement('span');
         span.textContent = tab + (state.isDirty && i === state.activeTab ? '*' : '');
-        span.style.overflow = 'hidden'; span.style.textOverflow = 'ellipsis'; span.style.cursor = 'pointer'; span.style.userSelect = 'none';
-        span.ondblclick = () => { state.renaming = i; renderTabs(); };
+        span.style.overflow = 'hidden';
+        span.style.textOverflow = 'ellipsis';
+        span.style.cursor = 'pointer';
+        span.style.userSelect = 'none';
+        span.ondblclick = function() { state.renaming = i; renderTabs(); };
         div.appendChild(span);
         if (state.tabs.length > 1) {
-          const close = document.createElement('button'); close.className = 'tab-close'; close.textContent = '×';
-          close.onclick = e => { e.stopPropagation(); closeTab(i); };
+          const close = document.createElement('button');
+          close.className = 'tab-close';
+          close.textContent = '×';
+          close.onclick = function(e) { e.stopPropagation(); closeTab(i); };
           div.appendChild(close);
         }
       }
-      div.onclick = () => switchTab(i);
+      div.onclick = function() { switchTab(i); };
       tabbar.appendChild(div);
     });
-    const add = document.createElement('button'); add.className = 'tab-add'; add.textContent = '+';
-    add.onclick = addTab; tabbar.appendChild(add);
+    const add = document.createElement('button');
+    add.className = 'tab-add';
+    add.textContent = '+';
+    add.onclick = addTab;
+    tabbar.appendChild(add);
   }
 
   function switchTab(i) {
@@ -694,7 +926,8 @@
   function closeTab(i) {
     if (state.tabs.length === 1) return;
     if (state.isPlaying || state.isPaused) stopSpeech();
-    state.tabs.splice(i, 1); state.texts.splice(i, 1);
+    state.tabs.splice(i, 1);
+    state.texts.splice(i, 1);
     if (state.activeTab >= i) state.activeTab = Math.max(0, state.activeTab - 1);
     saveTabs(); updateEditor(); renderTabs(); updateTitle(); updateStatus();
   }
@@ -720,7 +953,7 @@
   function closeCurrentTab() {
     if (state.isPlaying || state.isPaused) stopSpeech();
     if (state.isDirty && state.texts[state.activeTab]) {
-      confirmModal('Fechar documento', 'Deseja descartar as alterações não salvas?', () => { closeTab(state.activeTab); });
+      confirmModal('Fechar documento', 'Deseja descartar as alterações não salvas?', function() { closeTab(state.activeTab); });
     } else {
       closeTab(state.activeTab);
     }
@@ -749,7 +982,7 @@
 
   function applyEditorStyles() {
     const targets = state.isRenderedMd ? [mdViewer] : [editor];
-    targets.forEach(target => {
+    targets.forEach(function(target) {
       const z = state.zoom / 100;
       target.style.backgroundColor = state.colors.bg;
       target.style.color = state.colors.text;
@@ -777,7 +1010,7 @@
     $('st-words').textContent = 'Palavras: ' + words;
     $('st-chars').textContent = 'Chars: ' + chars;
     $('st-zoom').textContent = 'Zoom: ' + state.zoom + '%';
-    const voice = state.voices.find(v => v.name === state.selectedVoiceName);
+    const voice = state.voices.find(function(v) { return v.name === state.selectedVoiceName; });
     $('st-voice').textContent = voice ? '🎙 ' + voice.name : 'Sem voz';
     $('st-lang').textContent = voice ? voice.lang : '—';
     $('st-status').textContent = state.isPlaying ? '▶ Lendo...' : state.isPaused ? '⏸ Pausado' : '⏹ Parado';
@@ -794,7 +1027,7 @@
   }
 
   // === Editor events ===
-  editor.oninput = () => {
+  editor.oninput = function() {
     if (state.isPlaying || state.isPaused) return;
     state.texts[state.activeTab] = editor.innerText;
     state.isDirty = true;
@@ -807,15 +1040,21 @@
   function showSavedNotif() {
     if (savedTimer) clearTimeout(savedTimer);
     let el = $('saved-notif');
-    if (!el) { el = document.createElement('div'); el.id = 'saved-notif'; el.className = 'notif'; el.innerHTML = '<span>💾</span><span>Salvo automaticamente</span>'; document.body.appendChild(el); }
+    if (!el) {
+      el = document.createElement('div');
+      el.id = 'saved-notif';
+      el.className = 'notif';
+      el.innerHTML = '<span>💾</span><span>Salvo automaticamente</span>';
+      document.body.appendChild(el);
+    }
     el.style.display = 'flex';
-    savedTimer = setTimeout(() => { el.style.display = 'none'; }, 1500);
+    savedTimer = setTimeout(function() { el.style.display = 'none'; }, 1500);
   }
 
   // === File handling ===
   function processFile(file) {
     const reader = new FileReader();
-    reader.onload = e => {
+    reader.onload = function(e) {
       let text = e.target.result;
       const ext = (file.name.split('.').pop() || '').toLowerCase();
       if (ext === 'html' || ext === 'htm') text = text.replace(/<[^>]*>/g, '');
@@ -828,16 +1067,18 @@
     reader.readAsText(file);
   }
 
-  fileInput.onchange = e => { Array.from(e.target.files || []).forEach(processFile); e.target.value = ''; };
+  fileInput.onchange = function(e) { Array.from(e.target.files || []).forEach(processFile); e.target.value = ''; };
 
-  dropZone.ondragover = e => { e.preventDefault(); state.dragging = true; showDragOverlay(); };
-  dropZone.ondragleave = e => { e.preventDefault(); state.dragging = false; hideDragOverlay(); };
-  dropZone.ondrop = e => { e.preventDefault(); state.dragging = false; hideDragOverlay(); Array.from(e.dataTransfer.files || []).forEach(processFile); };
+  dropZone.ondragover = function(e) { e.preventDefault(); state.dragging = true; showDragOverlay(); };
+  dropZone.ondragleave = function(e) { e.preventDefault(); state.dragging = false; hideDragOverlay(); };
+  dropZone.ondrop = function(e) { e.preventDefault(); state.dragging = false; hideDragOverlay(); Array.from(e.dataTransfer.files || []).forEach(processFile); };
 
   function showDragOverlay() {
     let el = $('drag-overlay');
     if (!el) {
-      el = document.createElement('div'); el.id = 'drag-overlay'; el.className = 'drag-overlay';
+      el = document.createElement('div');
+      el.id = 'drag-overlay';
+      el.className = 'drag-overlay';
       el.innerHTML = '<div class="drag-box"><span style="font-size:48px">📥</span><h2 style="font-weight:bold; font-size:14px">Solte seus arquivos aqui!</h2><p style="font-size:12px; color:#6b7280">Abertos em abas automaticamente</p></div>';
       dropZone.appendChild(el);
     }
@@ -849,43 +1090,54 @@
   const menuData = {
     arquivo: [
       { label: 'Novo', shortcut: 'Ctrl+N', action: newDoc },
-      { label: 'Abrir arquivo...', shortcut: 'Ctrl+O', action: () => fileInput.click() },
+      { label: 'Abrir arquivo...', shortcut: 'Ctrl+O', action: function() { fileInput.click(); } },
       { label: 'Salvar texto como...', shortcut: 'Ctrl+S', action: saveText },
       { sep: true },
-      { label: 'Salvar como Áudio...', action: () => alertModal('Salvar como Áudio', 'Gravação de áudio requer compartilhamento de tela/áudio.\nNão disponível nesta versão 100% offline.') },
+      { label: 'Salvar como Áudio...', action: function() { alertModal('Salvar como Áudio', 'Gravação de áudio requer compartilhamento de tela/áudio.\nNão disponível nesta versão 100% offline.'); } },
       { sep: true },
       { label: '✕ Fechar', action: closeCurrentTab },
-      { label: '🗑️ Fechar Todos', action: () => confirmModal('Fechar Todos', 'Fechar todos os documentos? Isso descartará alterações não salvas.', closeAllTabs) },
-      { label: '📌 Manter apenas esta guia', action: () => confirmModal('Manter apenas esta guia', 'Fechar todas as outras abas? Isso descartará alterações não salvas.', closeOtherTabs) }
+      { label: '🗑️ Fechar Todos', action: function() { confirmModal('Fechar Todos', 'Fechar todos os documentos? Isso descartará alterações não salvas.', closeAllTabs); } },
+      { label: '📌 Manter apenas esta guia', action: function() { confirmModal('Manter apenas esta guia', 'Fechar todas as outras abas? Isso descartará alterações não salvas.', closeOtherTabs); } }
     ],
     editar: [
-      { label: 'Copiar', shortcut: 'Ctrl+C', action: () => document.execCommand('copy') },
-      { label: 'Colar', shortcut: 'Ctrl+V', action: () => document.execCommand('paste') },
-      { label: 'Selecionar Tudo', shortcut: 'Ctrl+A', action: () => { editor.focus(); document.execCommand('selectAll'); } },
+      { label: 'Copiar', shortcut: 'Ctrl+C', action: function() { document.execCommand('copy'); } },
+      { label: 'Colar', shortcut: 'Ctrl+V', action: function() { document.execCommand('paste'); } },
+      { label: 'Selecionar Tudo', shortcut: 'Ctrl+A', action: function() { editor.focus(); document.execCommand('selectAll'); } },
       { sep: true },
       { label: 'Localizar / Substituir...', shortcut: 'Ctrl+H', action: openFind },
       { sep: true },
-      { label: 'Limpar Texto', action: () => { state.texts[state.activeTab] = ''; state.isDirty = false; saveTabs(); updateEditor(); updateTitle(); } }
+      { label: 'Limpar Texto', action: function() { state.texts[state.activeTab] = ''; state.isDirty = false; saveTabs(); updateEditor(); updateTitle(); } }
     ],
     fala: [
       { label: '▶ Ler em Voz Alta', shortcut: 'F5', action: playSpeech },
       { label: '⏸ Pausar', shortcut: 'F6', action: pauseSpeech },
       { label: '⏹ Parar', shortcut: 'Esc', action: stopSpeech },
       { sep: true },
-      { label: '🔊 Testar Voz Atual', action: () => { const u = new SpeechSynthesisUtterance('Olá! Testando o timbre da voz.'); const voice = state.voices.find(v => v.name === state.selectedVoiceName) || state.voices.find(v => v.lang.startsWith('pt')) || state.voices[0]; if (voice) { u.voice = voice; u.lang = voice.lang; } u.rate = state.rate; u.pitch = state.pitch; u.volume = state.volume; window.speechSynthesis.cancel(); window.speechSynthesis.speak(u); } }
+      { label: '🔊 Testar Voz Atual', action: testVoice }
     ],
     exibir: [
       { label: 'Fontes e Cores...', action: openFontModal },
       { label: 'Tamanho dos Botões...', action: openSizeModal }
     ],
     ajuda: [
-      { label: 'Sobre o Balabolka...', action: () => alertModal('Sobre o Balabolka', 'Balabolka Web — Leitor de Texto em Voz\nVersão offline (Vanilla JS)\n\n• Vozes: Motor nativo do navegador\n• Arrastar e Soltar: TXT, HTML, MD\n• 100% offline, sem dependências externas') },
-      { label: 'Atalhos de Teclado', action: () => alertModal('Atalhos de Teclado', 'F5 — Ler texto\nF6 — Pausar\nEsc — Parar\nCtrl+N — Nova aba\nCtrl+O — Abrir arquivo\nCtrl+H — Localizar/Substituir\nCtrl+S — Salvar texto\nCtrl+A — Selecionar tudo\nCtrl+Z — Desfazer\nCtrl+Y — Refazer\nCtrl+ = / - / 0 — Zoom') }
+      { label: 'Sobre o Balabolka...', action: function() { alertModal('Sobre o Balabolka', 'Balabolka Web — Leitor de Texto em Voz\nVersão offline (Vanilla JS)\n\n• Vozes: Motor nativo do navegador\n• Arrastar e Soltar: TXT, HTML, MD\n• 100% offline, sem dependências externas\n• Leitura contínua com chunking automático'); } },
+      { label: 'Atalhos de Teclado', action: function() { alertModal('Atalhos de Teclado', 'F5 — Ler texto\nF6 — Pausar\nEsc — Parar\nCtrl+N — Nova aba\nCtrl+O — Abrir arquivo\nCtrl+H — Localizar/Substituir\nCtrl+S — Salvar texto\nCtrl+A — Selecionar tudo\nCtrl+Z — Desfazer\nCtrl+Y — Refazer\nCtrl+ = / - / 0 — Zoom'); } }
     ]
   };
 
-  document.querySelectorAll('.menu-btn').forEach(btn => {
-    btn.onclick = e => {
+  function testVoice() {
+    const u = new SpeechSynthesisUtterance('Olá! Testando o timbre da voz.');
+    const voice = state.voices.find(function(v) { return v.name === state.selectedVoiceName; })
+                  || state.voices.find(function(v) { return v.lang.startsWith('pt'); })
+                  || state.voices[0];
+    if (voice) { u.voice = voice; u.lang = voice.lang; }
+    u.rate = state.rate; u.pitch = state.pitch; u.volume = state.volume;
+    window.speechSynthesis.cancel();
+    window.speechSynthesis.speak(u);
+  }
+
+  document.querySelectorAll('.menu-btn').forEach(function(btn) {
+    btn.onclick = function(e) {
       e.stopPropagation();
       const name = btn.dataset.menu;
       if (state.activeMenu === name) { closeMenu(); return; }
@@ -894,31 +1146,35 @@
       btn.classList.add('active');
       const items = menuData[name];
       if (!items) return;
-      const dd = document.createElement('div'); dd.className = 'menu-dropdown'; dd.id = 'active-menu';
-      items.forEach(it => {
+      const dd = document.createElement('div');
+      dd.className = 'menu-dropdown';
+      dd.id = 'active-menu';
+      items.forEach(function(it) {
         if (it.sep) { const s = document.createElement('div'); s.className = 'menu-sep'; dd.appendChild(s); return; }
-        const b = document.createElement('button'); b.className = 'menu-item'; b.innerHTML = '<span>' + it.label + '</span>' + (it.shortcut ? '<span class="shortcut">' + it.shortcut + '</span>' : '');
-        b.onclick = () => { closeMenu(); it.action(); };
+        const b = document.createElement('button');
+        b.className = 'menu-item';
+        b.innerHTML = '<span>' + it.label + '</span>' + (it.shortcut ? '<span class="shortcut">' + it.shortcut + '</span>' : '');
+        b.onclick = function() { closeMenu(); it.action(); };
         dd.appendChild(b);
       });
       btn.parentElement.appendChild(dd);
     };
   });
 
-  document.addEventListener('mousedown', e => { if (!e.target.closest('.menu-dropdown') && !e.target.closest('.menu-btn')) closeMenu(); });
-  function closeMenu() { state.activeMenu = null; document.querySelectorAll('.menu-btn').forEach(b => b.classList.remove('active')); const dd = $('active-menu'); if (dd) dd.remove(); }
+  document.addEventListener('mousedown', function(e) { if (!e.target.closest('.menu-dropdown') && !e.target.closest('.menu-btn')) closeMenu(); });
+  function closeMenu() { state.activeMenu = null; document.querySelectorAll('.menu-btn').forEach(function(b) { b.classList.remove('active'); }); const dd = $('active-menu'); if (dd) dd.remove(); }
 
   // === Toolbar buttons ===
   $('tb-new').onclick = newDoc;
-  $('tb-open').onclick = () => fileInput.click();
+  $('tb-open').onclick = function() { fileInput.click(); };
   $('tb-save').onclick = saveText;
-  $('tb-copy').onclick = () => document.execCommand('copy');
-  $('tb-paste').onclick = () => document.execCommand('paste');
-  $('tb-select-all').onclick = () => { editor.focus(); document.execCommand('selectAll'); };
-  $('tb-undo').onclick = () => document.execCommand('undo');
-  $('tb-redo').onclick = () => document.execCommand('redo');
+  $('tb-copy').onclick = function() { document.execCommand('copy'); };
+  $('tb-paste').onclick = function() { document.execCommand('paste'); };
+  $('tb-select-all').onclick = function() { editor.focus(); document.execCommand('selectAll'); };
+  $('tb-undo').onclick = function() { document.execCommand('undo'); };
+  $('tb-redo').onclick = function() { document.execCommand('redo'); };
   $('tb-find').onclick = openFind;
-  $('tb-md').onclick = () => {
+  $('tb-md').onclick = function() {
     if (state.isPlaying || state.isPaused) { stopSpeech(); }
     state.isRenderedMd = !state.isRenderedMd;
     $('tb-md').classList.toggle('active', state.isRenderedMd);
@@ -927,102 +1183,52 @@
   $('tb-play').onclick = playSpeech;
   $('tb-pause').onclick = pauseSpeech;
   $('tb-stop').onclick = stopSpeech;
-  $('tb-test').onclick = () => { const u = new SpeechSynthesisUtterance('Olá! Testando o timbre da voz.'); const voice = state.voices.find(v => v.name === state.selectedVoiceName) || state.voices.find(v => v.lang.startsWith('pt')) || state.voices[0]; if (voice) { u.voice = voice; u.lang = voice.lang; } u.rate = state.rate; u.pitch = state.pitch; u.volume = state.volume; window.speechSynthesis.cancel(); window.speechSynthesis.speak(u); };
+  $('tb-test').onclick = testVoice;
   $('tb-font').onclick = openFontModal;
   $('tb-size').onclick = openSizeModal;
   $('tb-close').onclick = closeCurrentTab;
-  $('tb-close-all').onclick = () => confirmModal('Fechar Todos', 'Fechar todos os documentos? Isso descartará alterações não salvas.', closeAllTabs);
-  $('tb-close-others').onclick = () => confirmModal('Manter apenas esta guia', 'Fechar todas as outras abas? Isso descartará alterações não salvas.', closeOtherTabs);
-  $('btn-test-voice').onclick = () => { const u = new SpeechSynthesisUtterance('Olá! Testando o timbre da voz.'); const voice = state.voices.find(v => v.name === state.selectedVoiceName) || state.voices.find(v => v.lang.startsWith('pt')) || state.voices[0]; if (voice) { u.voice = voice; u.lang = voice.lang; } u.rate = state.rate; u.pitch = state.pitch; u.volume = state.volume; window.speechSynthesis.cancel(); window.speechSynthesis.speak(u); };
-  $('btn-fs').onclick = () => { if (!document.fullscreenElement) document.documentElement.requestFullscreen().catch(()=>{}); else document.exitFullscreen().catch(()=>{}); };
-
-  // === Função para aplicar parâmetros de fala em tempo real ===
-  function reapplySpeechIfPlaying() {
-    if (!state.ttsSupported || !state.isPlaying || state.isPaused) return;
-
-    // Interrompe a fala atual
-    if (window.speechSynthesis) {
-      window.speechSynthesis.cancel();
-    }
-
-    // Continua a partir do token atualmente destacado (ou do início se nenhum)
-    const startIdx = state.currentTokenIdx >= 0 ? state.currentTokenIdx : state.readingStartIdx;
-    const text = state.readingTokens.slice(startIdx).join('');
-    if (!text.trim()) return;
-
-    const utter = new SpeechSynthesisUtterance(text);
-    const voice = state.voices.find(v => v.name === state.selectedVoiceName) || state.voices.find(v => v.lang.startsWith('pt')) || state.voices[0];
-    if (voice) {
-      utter.voice = voice;
-      utter.lang = voice.lang;
-    }
-    utter.rate = state.rate;
-    utter.pitch = state.pitch;
-    utter.volume = state.volume;
-
-    let charCount = 0;
-    const tokenMap = [];
-    for (let i = startIdx; i < state.readingTokens.length; i++) {
-      tokenMap.push({ start: charCount, end: charCount + state.readingTokens[i].length, idx: i });
-      charCount += state.readingTokens[i].length;
-    }
-
-    let lastTokenIdx = -1;
-    utter.onboundary = (e) => {
-      if (e.name !== 'word') return;
-      let activeIdx = -1;
-      for (let t = 0; t < tokenMap.length; t++) {
-        if (e.charIndex >= tokenMap[t].start && e.charIndex < tokenMap[t].end) {
-          activeIdx = tokenMap[t].idx;
-          break;
-        }
-      }
-      if (activeIdx !== -1 && activeIdx !== lastTokenIdx) {
-        lastTokenIdx = activeIdx;
-        highlightToken(activeIdx);
-      }
-    };
-
-    utter.onend = () => restoreEditorMode();
-    utter.onerror = (e) => {
-      if (e.error !== 'interrupted' && e.error !== 'canceled') restoreEditorMode();
-    };
-
-    window.speechSynthesis.speak(utter);
-    state.currentUtterance = utter;
-  }
+  $('tb-close-all').onclick = function() { confirmModal('Fechar Todos', 'Fechar todos os documentos? Isso descartará alterações não salvas.', closeAllTabs); };
+  $('tb-close-others').onclick = function() { confirmModal('Manter apenas esta guia', 'Fechar todas as outras abas? Isso descartará alterações não salvas.', closeOtherTabs); };
+  $('btn-test-voice').onclick = testVoice;
+  $('btn-fs').onclick = function() { if (!document.fullscreenElement) document.documentElement.requestFullscreen().catch(function(){}); else document.exitFullscreen().catch(function(){}); };
 
   // === Sliders ===
   function bindSlider(id, valId, key, fmt) {
     const el = $(id), val = $(valId);
     el.value = state[key];
     val.textContent = fmt(state[key]);
-    el.oninput = () => {
+    el.oninput = function() {
       const v = parseFloat(el.value);
       state[key] = v;
       val.textContent = fmt(v);
       LS.set('balabolka_' + key, v);
       updateStatus();
-
-      // Aplica imediatamente se estiver tocando
       reapplySpeechIfPlaying();
     };
   }
-  bindSlider('range-rate', 'val-rate', 'rate', v => v.toFixed(1) + 'x');
-  bindSlider('range-pitch', 'val-pitch', 'pitch', v => v.toFixed(2));
-  bindSlider('range-volume', 'val-volume', 'volume', v => Math.round(v*100) + '%');
+  bindSlider('range-rate',   'val-rate',    'rate',   function(v) { return v.toFixed(1) + 'x'; });
+  bindSlider('range-pitch',  'val-pitch',   'pitch',  function(v) { return v.toFixed(2); });
+  bindSlider('range-volume', 'val-volume',  'volume', function(v) { return Math.round(v*100) + '%'; });
 
   // === New / Save ===
   function newDoc() {
     if (state.isPlaying || state.isPaused) stopSpeech();
     if (state.isDirty && state.texts[state.activeTab]) {
-      confirmModal('Criar Novo Documento', 'Deseja descartar as alterações não salvas?', () => { state.texts[state.activeTab] = ''; state.isDirty = false; saveTabs(); updateEditor(); updateTitle(); });
-    } else { state.texts[state.activeTab] = ''; state.isDirty = false; saveTabs(); updateEditor(); updateTitle(); }
+      confirmModal('Criar Novo Documento', 'Deseja descartar as alterações não salvas?', function() {
+        state.texts[state.activeTab] = ''; state.isDirty = false; saveTabs(); updateEditor(); updateTitle();
+      });
+    } else {
+      state.texts[state.activeTab] = ''; state.isDirty = false; saveTabs(); updateEditor(); updateTitle();
+    }
   }
+
   function saveText() {
     const blob = new Blob([state.texts[state.activeTab] || ''], { type: 'text/plain;charset=utf-8' });
     const url = URL.createObjectURL(blob);
-    const a = document.createElement('a'); a.href = url; a.download = (state.tabs[state.activeTab] || 'documento') + '.txt'; a.click(); URL.revokeObjectURL(url); state.isDirty = false; updateTitle(); updateStatus();
+    const a = document.createElement('a');
+    a.href = url; a.download = (state.tabs[state.activeTab] || 'documento') + '.txt';
+    a.click(); URL.revokeObjectURL(url);
+    state.isDirty = false; updateTitle(); updateStatus();
   }
 
   // === Find / Replace ===
@@ -1037,7 +1243,7 @@
       '</div>';
     openModal('Localizar / Substituir', html, '420px');
     $('btn-find-close').onclick = closeModal;
-    $('btn-find-go').onclick = () => {
+    $('btn-find-go').onclick = function() {
       state.findText = $('find-txt').value; state.findCase = $('find-case').checked;
       const flags = state.findCase ? 'g' : 'gi';
       const regex = new RegExp(state.findText.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), flags);
@@ -1047,27 +1253,28 @@
       if (matches) { res.style.background = '#f0fdf4'; res.style.border = '1px solid #86efac'; res.style.color = '#15803d'; res.textContent = matches.length + ' ocorrência(s) encontrada(s).'; }
       else { res.style.background = '#fef2f2'; res.style.border = '1px solid #fca5a5'; res.style.color = '#b91c1c'; res.textContent = 'Nenhuma ocorrência encontrada.'; }
     };
-    $('btn-replace-go').onclick = () => {
+    $('btn-replace-go').onclick = function() {
       state.findText = $('find-txt').value; state.replaceText = $('replace-txt').value; state.findCase = $('find-case').checked;
       const flags = state.findCase ? 'g' : 'gi';
       const regex = new RegExp(state.findText.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), flags);
       state.texts[state.activeTab] = (state.texts[state.activeTab] || '').replace(regex, state.replaceText);
       state.isDirty = true; saveTabs(); updateEditor(); updateStatus(); closeModal();
     };
-    setTimeout(() => $('find-txt').focus(), 50);
+    setTimeout(function() { $('find-txt').focus(); }, 50);
   }
 
   // === Font modal ===
   function openFontModal() {
     if (state.isPlaying || state.isPaused) stopSpeech();
-    const p = { ...state.colors }; const f = { ...state.font };
+    const p = Object.assign({}, state.colors);
+    const f = Object.assign({}, state.font);
     const families = ["Courier New", "Arial", "Times New Roman", "Verdana", "Georgia", "Tahoma", "Segoe UI", "Consolas"];
     const sizes = [8,9,10,11,12,14,16,18,20,22,24,26,28,36,48,72,96,144,200];
     let html = '<div style="padding:16px; display:flex; flex-direction:column; gap:12px;">';
     html += '<div id="font-preview" style="min-height:80px; max-height:200px; overflow:auto; border:1px solid #808080; display:flex; align-items:center; justify-content:center; padding:0 16px; gap:8px; border-radius:2px; background:' + p.bg + '; color:' + p.text + '; font-family:' + f.family + '; font-size:' + f.size + 'px; font-weight:' + (f.bold?'bold':'normal') + '; font-style:' + (f.italic?'italic':'normal') + '; line-height:' + (f.lineHeight||1.4) + ';"><span>Texto normal </span><span style="color:' + p.read + '">Texto lido </span><span style="background-color:' + p.highlight + '; color:#fff; padding:0 4px; border-radius:2px;">Palavra atual</span></div>';
     html += '<div style="display:grid; grid-template-columns:1fr 1fr; gap:12px;">';
-    html += '<div style="display:flex; flex-direction:column; gap:4px"><label style="font-size:12px; font-weight:bold">Fonte:</label><select class="xp-select" id="font-family">' + families.map(fm => '<option value="' + fm + '" ' + (f.family===fm?'selected':'') + '>' + fm + '</option>').join('') + '</select></div>';
-    html += '<div style="display:flex; flex-direction:column; gap:4px"><label style="font-size:12px; font-weight:bold">Tamanho:</label><div style="display:flex; gap:4px"><input type="number" class="xp-input" id="font-size" value="' + f.size + '" min="1" max="200" style="flex:1"><select class="xp-select" id="font-size-preset" style="width:70px">' + sizes.map(sz => '<option value="' + sz + '" ' + (f.size===sz?'selected':'') + '>' + sz + '</option>').join('') + '</select></div></div>';
+    html += '<div style="display:flex; flex-direction:column; gap:4px"><label style="font-size:12px; font-weight:bold">Fonte:</label><select class="xp-select" id="font-family">' + families.map(function(fm) { return '<option value="' + fm + '" ' + (f.family===fm?'selected':'') + '>' + fm + '</option>'; }).join('') + '</select></div>';
+    html += '<div style="display:flex; flex-direction:column; gap:4px"><label style="font-size:12px; font-weight:bold">Tamanho:</label><div style="display:flex; gap:4px"><input type="number" class="xp-input" id="font-size" value="' + f.size + '" min="1" max="200" style="flex:1"><select class="xp-select" id="font-size-preset" style="width:70px">' + sizes.map(function(sz) { return '<option value="' + sz + '" ' + (f.size===sz?'selected':'') + '>' + sz + '</option>'; }).join('') + '</select></div></div>';
     html += '</div>';
     html += '<div style="display:flex; gap:24px"><label style="display:flex; align-items:center; gap:6px; font-size:12px; cursor:pointer"><input type="checkbox" id="font-bold" ' + (f.bold?'checked':'') + '> <strong>Negrito</strong></label><label style="display:flex; align-items:center; gap:6px; font-size:12px; cursor:pointer"><input type="checkbox" id="font-italic" ' + (f.italic?'checked':'') + '> <em>Itálico</em></label></div>';
     html += '<div style="display:flex; flex-direction:column; gap:4px"><label style="font-size:12px; font-weight:bold">Espaçamento entre linhas:</label><div style="display:flex; align-items:center; gap:8px"><input type="range" id="font-lh" min="1" max="3" step="0.1" value="' + (f.lineHeight||1.4) + '" style="flex:1"><span style="font-size:12px; font-weight:bold; font-family:monospace; min-width:30px" id="font-lh-val">' + (f.lineHeight||1.4).toFixed(1) + '</span></div></div>';
@@ -1109,30 +1316,31 @@
       $('font-lh-val').textContent = flh.toFixed(1);
     }
 
-    ['font-family','font-size','font-bold','font-italic','font-lh','col-text','col-bg','col-read','col-hl'].forEach(id => { $(id).oninput = updatePreview; });
-    $('font-size-preset').onchange = () => { $('font-size').value = $('font-size-preset').value; updatePreview(); };
+    ['font-family','font-size','font-bold','font-italic','font-lh','col-text','col-bg','col-read','col-hl'].forEach(function(id) { $(id).oninput = updatePreview; });
+    $('font-size-preset').onchange = function() { $('font-size').value = $('font-size-preset').value; updatePreview(); };
     $('font-lh').oninput = updatePreview;
 
-    const applyTheme = t => {
+    function applyTheme(t) {
       $('col-text').value = t.text; $('col-bg').value = t.bg; $('col-read').value = t.read; $('col-hl').value = t.highlight;
       updatePreview();
-    };
-    $('theme-dark').onclick = () => applyTheme({ text:'#ffffff', bg:'#000000', read:'#ff4444', highlight:'#3399ff' });
-    $('theme-light').onclick = () => applyTheme({ text:'#000000', bg:'#ffffff', read:'#cc0000', highlight:'#0066ff' });
-    $('theme-vscode').onclick = () => applyTheme({ text:'#d4d4d4', bg:'#1e1e1e', read:'#ff8c00', highlight:'#264f78' });
-    $('theme-solar').onclick = () => applyTheme({ text:'#3d2b00', bg:'#fdf6e3', read:'#859900', highlight:'#b58900' });
+    }
+    $('theme-dark').onclick  = function() { applyTheme({ text:'#ffffff', bg:'#000000', read:'#ff4444', highlight:'#3399ff' }); };
+    $('theme-light').onclick = function() { applyTheme({ text:'#000000', bg:'#ffffff', read:'#cc0000', highlight:'#0066ff' }); };
+    $('theme-vscode').onclick= function() { applyTheme({ text:'#d4d4d4', bg:'#1e1e1e', read:'#ff8c00', highlight:'#264f78' }); };
+    $('theme-solar').onclick = function() { applyTheme({ text:'#3d2b00', bg:'#fdf6e3', read:'#859900', highlight:'#b58900' }); };
 
-    $('btn-font-ok').onclick = () => {
-      state.font.family = $('font-family').value;
-      state.font.size = parseInt($('font-size').value) || 14;
-      state.font.bold = $('font-bold').checked;
-      state.font.italic = $('font-italic').checked;
+    $('btn-font-ok').onclick = function() {
+      state.font.family     = $('font-family').value;
+      state.font.size       = parseInt($('font-size').value) || 14;
+      state.font.bold       = $('font-bold').checked;
+      state.font.italic     = $('font-italic').checked;
       state.font.lineHeight = parseFloat($('font-lh').value) || 1.4;
-      state.colors.text = $('col-text').value;
-      state.colors.bg = $('col-bg').value;
-      state.colors.read = $('col-read').value;
-      state.colors.highlight = $('col-hl').value;
-      LS.set('balabolka_font', state.font); LS.set('balabolka_colors', state.colors);
+      state.colors.text     = $('col-text').value;
+      state.colors.bg       = $('col-bg').value;
+      state.colors.read     = $('col-read').value;
+      state.colors.highlight= $('col-hl').value;
+      LS.set('balabolka_font', state.font);
+      LS.set('balabolka_colors', state.colors);
       setCSSColors(); applyEditorStyles(); closeModal();
     };
     $('btn-font-cancel').onclick = closeModal;
@@ -1143,14 +1351,14 @@
     let html = '<div style="padding:16px; display:flex; flex-direction:column; gap:12px;">';
     html += '<h3 style="font-size:12px; font-weight:bold; color:#374151">Tamanho dos botões de controle:</h3>';
     html += '<div style="display:flex; flex-direction:column; gap:8px">';
-    sizes.forEach(([sz,lbl]) => {
-      html += '<label style="display:flex; align-items:center; gap:8px; font-size:12px; cursor:pointer; user-select:none"><input type="radio" name="bsz" value="' + sz + '" ' + (state.buttonSize===sz?'checked':'') + '> <span>' + lbl + '</span></label>';
+    sizes.forEach(function(s) {
+      html += '<label style="display:flex; align-items:center; gap:8px; font-size:12px; cursor:pointer; user-select:none"><input type="radio" name="bsz" value="' + s[0] + '" ' + (state.buttonSize===s[0]?'checked':'') + '> <span>' + s[1] + '</span></label>';
     });
     html += '</div>';
     html += '<div style="display:flex; justify-content:flex-end; padding-top:8px; border-top:1px solid #d1d5db"><button class="xp-btn" id="btn-size-ok">OK</button></div>';
     html += '</div>';
     openModal('Configurar Interface', html, '350px');
-    $('btn-size-ok').onclick = () => {
+    $('btn-size-ok').onclick = function() {
       const r = document.querySelector('input[name="bsz"]:checked');
       if (r) { state.buttonSize = r.value; LS.set('balabolka_buttonSize', state.buttonSize); applyButtonSize(); }
       closeModal();
@@ -1158,11 +1366,12 @@
   }
 
   function applyButtonSize() {
-    const map = { xs: '24px', sm: '28px', md: '36px', lg: '44px', xl: '56px' };
-    const sz = map[state.buttonSize] || '28px';
+    const map     = { xs: '24px', sm: '28px', md: '36px', lg: '44px', xl: '56px' };
     const fontMap = { xs: '12px', sm: '14px', md: '18px', lg: '22px', xl: '28px' };
-    document.querySelectorAll('.toolbar-btn').forEach(b => {
-      b.style.width = sz; b.style.height = sz;
+    const sz = map[state.buttonSize] || '28px';
+    document.querySelectorAll('.toolbar-btn').forEach(function(b) {
+      b.style.width    = sz;
+      b.style.height   = sz;
       b.style.fontSize = fontMap[state.buttonSize] || '14px';
     });
   }
@@ -1171,55 +1380,66 @@
   // === Modal system ===
   function openModal(title, bodyHtml, width) {
     closeModal();
-    const overlay = document.createElement('div'); overlay.className = 'modal-overlay'; overlay.id = 'modal-overlay';
+    const overlay = document.createElement('div');
+    overlay.className = 'modal-overlay';
+    overlay.id = 'modal-overlay';
     overlay.innerHTML = '<div class="modal-box" style="width:' + (width||'400px') + '"><div class="modal-titlebar" id="modal-titlebar"><span>' + escapeHtml(title) + '</span><button class="modal-close" id="modal-close">✕</button></div><div id="modal-body">' + bodyHtml + '</div></div>';
     modals.appendChild(overlay);
     $('modal-close').onclick = closeModal;
-    overlay.onclick = e => { if (e.target === overlay) closeModal(); };
+    overlay.onclick = function(e) { if (e.target === overlay) closeModal(); };
     document.addEventListener('keydown', modalEsc);
 
     const tbar = $('modal-titlebar');
-    let dragging = false, offsetX = 0, offsetY = 0, box = overlay.querySelector('.modal-box');
-    tbar.onmousedown = e => {
+    let dragging = false, offsetX = 0, offsetY = 0;
+    const box = overlay.querySelector('.modal-box');
+    tbar.onmousedown = function(e) {
       if (e.target.closest('.modal-close')) return;
       dragging = true;
       const rect = box.getBoundingClientRect();
       offsetX = e.clientX - rect.left;
       offsetY = e.clientY - rect.top;
       box.style.position = 'fixed';
-      box.style.left = rect.left + 'px';
-      box.style.top = rect.top + 'px';
-      box.style.right = 'auto';
+      box.style.left   = rect.left + 'px';
+      box.style.top    = rect.top + 'px';
+      box.style.right  = 'auto';
       box.style.bottom = 'auto';
       box.style.margin = '0';
       e.preventDefault();
     };
-    window.addEventListener('mousemove', e => {
+    window.addEventListener('mousemove', function(e) {
       if (!dragging) return;
       box.style.left = (e.clientX - offsetX) + 'px';
-      box.style.top = (e.clientY - offsetY) + 'px';
+      box.style.top  = (e.clientY - offsetY) + 'px';
     });
-    window.addEventListener('mouseup', () => { dragging = false; });
+    window.addEventListener('mouseup', function() { dragging = false; });
   }
-  function closeModal() { const ov = $('modal-overlay'); if (ov) ov.remove(); document.removeEventListener('keydown', modalEsc); }
+
+  function closeModal() {
+    const ov = $('modal-overlay');
+    if (ov) ov.remove();
+    document.removeEventListener('keydown', modalEsc);
+  }
   function modalEsc(e) { if (e.key === 'Escape') closeModal(); }
 
   function alertModal(title, message) {
     const html = '<div style="padding:16px; display:flex; flex-direction:column; gap:12px;"><div style="display:flex; align-items:flex-start; gap:12px"><span style="font-size:28px">ℹ️</span><p style="font-size:12px; color:#374151; white-space:pre-wrap; flex:1">' + escapeHtml(message) + '</p></div><div style="display:flex; justify-content:flex-end; padding-top:8px; border-top:1px solid #d1d5db"><button class="xp-btn" style="font-weight:bold; padding-left:24px; padding-right:24px" id="alert-ok">OK</button></div></div>';
-    openModal(title, html, '380px'); $('alert-ok').onclick = closeModal;
+    openModal(title, html, '380px');
+    $('alert-ok').onclick = closeModal;
   }
+
   function confirmModal(title, message, onYes) {
     const html = '<div style="padding:16px; display:flex; flex-direction:column; gap:12px;"><div style="display:flex; align-items:flex-start; gap:12px"><span style="font-size:28px">❓</span><p style="font-size:12px; color:#374151; white-space:pre-wrap; flex:1">' + escapeHtml(message) + '</p></div><div style="display:flex; justify-content:flex-end; gap:8px; padding-top:8px; border-top:1px solid #d1d5db"><button class="xp-btn" style="font-weight:bold" id="confirm-yes">Sim</button><button class="xp-btn cancel" id="confirm-no">Não</button></div></div>';
-    openModal(title, html, '380px'); $('confirm-yes').onclick = () => { onYes(); closeModal(); }; $('confirm-no').onclick = closeModal;
+    openModal(title, html, '380px');
+    $('confirm-yes').onclick = function() { onYes(); closeModal(); };
+    $('confirm-no').onclick = closeModal;
   }
 
   // === Hotkeys ===
-  document.addEventListener('keydown', e => {
+  document.addEventListener('keydown', function(e) {
     const modalOpen = !!$('modal-overlay');
     if (e.key === 'F5') { e.preventDefault(); playSpeech(); }
     if (e.key === 'F6') { e.preventDefault(); pauseSpeech(); }
     if (e.key === 'Escape' && !modalOpen) { e.preventDefault(); stopSpeech(); closeMenu(); }
-    if (e.key === 'F3') { e.preventDefault(); }
     if (e.ctrlKey && e.key === 'h') { e.preventDefault(); openFind(); }
     if (e.ctrlKey && e.key === 'f') { e.preventDefault(); openFind(); }
     if (e.ctrlKey && e.key === 'n') { e.preventDefault(); addTab(); }
@@ -1232,7 +1452,15 @@
     if (e.ctrlKey && e.key === '0') { e.preventDefault(); state.zoom = 100; LS.set('balabolka_zoom', state.zoom); updateEditor(); updateStatus(); }
   });
 
-  document.addEventListener('wheel', e => { if (e.ctrlKey) { e.preventDefault(); const d = e.deltaY > 0 ? -10 : 10; state.zoom = Math.max(50, Math.min(200, state.zoom + d)); LS.set('balabolka_zoom', state.zoom); updateEditor(); updateStatus(); } }, { passive: false });
+  document.addEventListener('wheel', function(e) {
+    if (e.ctrlKey) {
+      e.preventDefault();
+      const d = e.deltaY > 0 ? -10 : 10;
+      state.zoom = Math.max(50, Math.min(200, state.zoom + d));
+      LS.set('balabolka_zoom', state.zoom);
+      updateEditor(); updateStatus();
+    }
+  }, { passive: false });
 
   // === Init ===
   updateEditor(); renderTabs(); updateTitle(); updateStatus();
