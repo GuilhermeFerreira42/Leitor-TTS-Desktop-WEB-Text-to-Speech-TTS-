@@ -448,34 +448,72 @@
     return state.isRenderedMd ? stripMarkdown(state.texts[state.activeTab] || '') : state.texts[state.activeTab] || '';
   }
 
-  function getCursorOffset() {
-    const sel = window.getSelection();
-    if (!sel.rangeCount) return 0;
-    const range = sel.getRangeAt(0);
-    if (!editor.contains(range.startContainer)) return 0;
+ function getCursorOffset() {
+  var sel = window.getSelection();
+  if (!sel || !sel.rangeCount) return 0;
+  var range = sel.getRangeAt(0);
+  if (!editor.contains(range.startContainer)) return 0;
 
-    let charCount = 0;
-    const treeWalker = document.createTreeWalker(
-      editor,
-      NodeFilter.SHOW_TEXT,
-      null,
-      false
-    );
+  var targetNode   = range.startContainer;
+  var targetOffset = range.startOffset;
+  var pos          = 0;
+  var found        = false;
 
-    let node;
-    while (node = treeWalker.nextNode()) {
-      if (node === range.startContainer) {
-        charCount += range.startOffset;
-        return charCount;
+  var BLOCK_TAGS = {
+    div: 1, p: 1, li: 1,
+    h1: 1, h2: 1, h3: 1, h4: 1, h5: 1, h6: 1,
+    blockquote: 1, pre: 1, tr: 1
+  };
+
+  function walk(node, isFirst) {
+    if (found) return;
+
+    if (node.nodeType === 3) {
+      // Nó de texto puro
+      if (node === targetNode) {
+        pos += targetOffset;
+        found = true;
+        return;
       }
-      charCount += node.length;
-    }
+      pos += node.length;
 
-    const pre = document.createRange();
-    pre.selectNodeContents(editor);
-    pre.setEnd(range.startContainer, range.startOffset);
-    return pre.toString().length;
+    } else if (node.nodeType === 1) {
+      var tag = node.tagName.toLowerCase();
+
+      if (tag === 'br') {
+        // <br> vale 1 caractere \n no innerText
+        if (node === targetNode) { found = true; return; }
+        pos += 1;
+        return;
+      }
+
+      // Elemento de bloco não-primeiro contribui com 1 \n implícito,
+      // exatamente como o innerText enxerga
+      if (!isFirst && BLOCK_TAGS[tag]) {
+        if (node === targetNode) { found = true; return; }
+        pos += 1;
+        if (found) return;
+      }
+
+      var firstChild = true;
+      for (var i = 0; i < node.childNodes.length; i++) {
+        walk(node.childNodes[i], firstChild);
+        firstChild = false;
+        if (found) return;
+      }
+    }
   }
+
+  var firstChild = true;
+  for (var i = 0; i < editor.childNodes.length; i++) {
+    walk(editor.childNodes[i], firstChild);
+    firstChild = false;
+    if (found) break;
+  }
+
+  return pos;
+}
+
 
   function findStartToken(tokens, charOffset) {
     let acc = 0;
@@ -1232,37 +1270,383 @@
   }
 
   // === Find / Replace ===
-  function openFind() {
-    if (state.isPlaying || state.isPaused) stopSpeech();
-    const html = '<div style="padding:16px; display:flex; flex-direction:column; gap:12px;">' +
-      '<div style="display:flex; flex-direction:column; gap:4px"><label style="font-size:12px; font-weight:bold">Localizar:</label><input class="xp-input" id="find-txt" placeholder="Texto a localizar..." value="' + escapeHtml(state.findText) + '"></div>' +
-      '<div style="display:flex; flex-direction:column; gap:4px"><label style="font-size:12px; font-weight:bold">Substituir por:</label><input class="xp-input" id="replace-txt" placeholder="Texto substituto..." value="' + escapeHtml(state.replaceText) + '"></div>' +
-      '<label style="display:flex; align-items:center; gap:8px; font-size:12px; cursor:pointer"><input type="checkbox" id="find-case" ' + (state.findCase ? 'checked' : '') + '> Diferenciar maiúsculas/minúsculas</label>' +
-      '<div style="display:flex; gap:8px; padding-top:4px"><button class="xp-btn" id="btn-find-go">Localizar</button><button class="xp-btn" id="btn-replace-go">Substituir Tudo</button><button class="xp-btn cancel" id="btn-find-close">Fechar</button></div>' +
-      '<div id="find-result" style="font-size:12px; padding:6px 8px; border-radius:2px; display:none"></div>' +
-      '</div>';
-    openModal('Localizar / Substituir', html, '420px');
-    $('btn-find-close').onclick = closeModal;
-    $('btn-find-go').onclick = function() {
-      state.findText = $('find-txt').value; state.findCase = $('find-case').checked;
-      const flags = state.findCase ? 'g' : 'gi';
-      const regex = new RegExp(state.findText.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), flags);
-      const matches = (state.texts[state.activeTab] || '').match(regex);
-      const res = $('find-result');
-      res.style.display = 'block';
-      if (matches) { res.style.background = '#f0fdf4'; res.style.border = '1px solid #86efac'; res.style.color = '#15803d'; res.textContent = matches.length + ' ocorrência(s) encontrada(s).'; }
-      else { res.style.background = '#fef2f2'; res.style.border = '1px solid #fca5a5'; res.style.color = '#b91c1c'; res.textContent = 'Nenhuma ocorrência encontrada.'; }
-    };
-    $('btn-replace-go').onclick = function() {
-      state.findText = $('find-txt').value; state.replaceText = $('replace-txt').value; state.findCase = $('find-case').checked;
-      const flags = state.findCase ? 'g' : 'gi';
-      const regex = new RegExp(state.findText.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), flags);
-      state.texts[state.activeTab] = (state.texts[state.activeTab] || '').replace(regex, state.replaceText);
-      state.isDirty = true; saveTabs(); updateEditor(); updateStatus(); closeModal();
-    };
-    setTimeout(function() { $('find-txt').focus(); }, 50);
+
+ function openFind() {
+  var existing = document.getElementById('find-panel');
+  if (existing) { existing.remove(); return; }
+
+  if (state.isPlaying || state.isPaused) stopSpeech();
+
+  var panel = document.createElement('div');
+  panel.id = 'find-panel';
+  panel.style.cssText = [
+    'position:fixed',
+    'top:120px',
+    'right:24px',
+    'z-index:800',
+    'background:#ece9d8',
+    'border:2px solid white',
+    'border-right-color:#404040',
+    'border-bottom-color:#404040',
+    'box-shadow:4px 4px 16px rgba(0,0,0,0.4)',
+    'width:370px',
+    'font-size:12px',
+    'user-select:none'
+  ].join(';');
+
+  panel.innerHTML = [
+    '<div id="fp-titlebar" style="display:flex;align-items:center;justify-content:space-between;',
+      'padding:5px 10px;background:linear-gradient(to right,#0058e6,#3a93ff);',
+      'color:white;font-weight:bold;font-size:12px;cursor:move;">',
+      '<span>🔍 Localizar / Substituir</span>',
+      '<button id="fp-close" style="background:transparent;border:none;color:white;',
+        'cursor:pointer;font-size:14px;line-height:1;padding:0 2px;">✕</button>',
+    '</div>',
+    '<div style="padding:12px;display:flex;flex-direction:column;gap:10px;">',
+
+      '<div style="display:flex;flex-direction:column;gap:4px;">',
+        '<label style="font-size:11px;font-weight:bold;color:#374151;">Localizar:</label>',
+        '<div style="display:flex;gap:4px;">',
+          '<input id="fp-find" class="xp-input" style="flex:1;" ',
+            'placeholder="Digite o texto a localizar..." ',
+            'value="' + escapeHtml(state.findText) + '">',
+          '<button class="xp-btn" id="fp-search" title="Localizar (Enter)">🔍</button>',
+        '</div>',
+      '</div>',
+
+      '<div style="display:flex;flex-direction:column;gap:4px;">',
+        '<label style="font-size:11px;font-weight:bold;color:#374151;">Substituir por:</label>',
+        '<input id="fp-replace" class="xp-input" placeholder="Texto substituto..." ',
+          'value="' + escapeHtml(state.replaceText) + '">',
+      '</div>',
+
+      '<label style="display:flex;align-items:center;gap:8px;font-size:12px;',
+        'cursor:pointer;user-select:none;">',
+        '<input type="checkbox" id="fp-case" ' + (state.findCase ? 'checked' : '') + '> ',
+        'Diferenciar maiúsculas/minúsculas',
+      '</label>',
+
+      '<div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">',
+        '<button class="xp-btn" id="fp-prev">◀ Anterior</button>',
+        '<button class="xp-btn" id="fp-next">Próximo ▶</button>',
+        '<span id="fp-counter" style="font-size:11px;font-weight:bold;',
+          'color:#374151;min-width:80px;">—</span>',
+      '</div>',
+
+      '<div style="display:flex;gap:6px;flex-wrap:wrap;padding-top:4px;',
+        'border-top:1px solid #d1d5db;">',
+        '<button class="xp-btn" id="fp-rep-one">Substituir este</button>',
+        '<button class="xp-btn" id="fp-rep-all">Substituir Tudo</button>',
+      '</div>',
+
+      '<div id="fp-result" style="font-size:12px;padding:5px 8px;border-radius:2px;',
+        'display:none;"></div>',
+
+    '</div>'
+  ].join('');
+
+  document.body.appendChild(panel);
+
+  var fpFind    = document.getElementById('fp-find');
+  var fpReplace = document.getElementById('fp-replace');
+  var fpCase    = document.getElementById('fp-case');
+  var fpCounter = document.getElementById('fp-counter');
+  var fpResult  = document.getElementById('fp-result');
+
+  var matches      = [];
+  var currentMatch = -1;
+
+  // -----------------------------------------------------------------------
+  // Fecha o painel
+  // -----------------------------------------------------------------------
+  function closeFind() {
+    clearFindHighlight();
+    var p = document.getElementById('find-panel');
+    if (p) p.remove();
+    document.removeEventListener('keydown', findKeyHandler);
+  }
+  document.getElementById('fp-close').onclick = closeFind;
+
+  function findKeyHandler(e) {
+    if (e.key === 'Escape') { e.stopPropagation(); closeFind(); }
+    if (e.key === 'Enter' && document.activeElement === fpFind) {
+      e.preventDefault();
+      // Se ainda não buscou, busca. Se já buscou, vai ao próximo.
+      if (matches.length === 0) {
+        findAllMatches();
+      } else {
+        goToMatch(currentMatch + 1);
+      }
+    }
+  }
+  document.addEventListener('keydown', findKeyHandler);
+
+  function clearFindHighlight() {
+    if (window.getSelection) window.getSelection().removeAllRanges();
   }
 
+  function updateCounter() {
+    if (matches.length === 0) {
+      fpCounter.textContent = state.findText ? '0 resultados' : '—';
+      fpCounter.style.color = state.findText ? '#b91c1c' : '#374151';
+    } else {
+      fpCounter.textContent = (currentMatch + 1) + ' de ' + matches.length;
+      fpCounter.style.color = '#15803d';
+    }
+  }
+
+  // -----------------------------------------------------------------------
+  // Busca usando editor.innerText para garantir que os offsets batem
+  // com o que está renderizado no DOM, incluindo quebras de linha
+  // -----------------------------------------------------------------------
+  function findAllMatches() {
+    var needle = fpFind.value;
+    state.findText    = needle;
+    state.findCase    = fpCase.checked;
+    state.replaceText = fpReplace.value;
+
+    clearFindHighlight();
+    matches      = [];
+    currentMatch = -1;
+    fpResult.style.display = 'none';
+
+    if (!needle) { updateCounter(); return; }
+
+    // Usa innerText para que os offsets reflitam exatamente o DOM
+    var haystack = editor.innerText || '';
+    var flags    = state.findCase ? 'g' : 'gi';
+    var regex;
+    try {
+      regex = new RegExp(needle.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), flags);
+    } catch(e) { updateCounter(); return; }
+
+    var m;
+    while ((m = regex.exec(haystack)) !== null) {
+      matches.push({ start: m.index, end: m.index + m[0].length });
+    }
+
+    updateCounter();
+
+    if (matches.length > 0) {
+      currentMatch = 0;
+      selectMatchInEditor(matches[0]);
+    }
+  }
+
+  function goToMatch(idx) {
+    if (matches.length === 0) { findAllMatches(); return; }
+    currentMatch = ((idx % matches.length) + matches.length) % matches.length;
+    selectMatchInEditor(matches[currentMatch]);
+    updateCounter();
+  }
+
+  // -----------------------------------------------------------------------
+  // Mapeia um offset de caractere (baseado em innerText) para o nó de
+  // texto e posição exatos dentro do contenteditable.
+  //
+  // A diferença crítica em relação à versão anterior: quando encontramos
+  // um elemento de bloco (div, p etc.) que NÃO é o primeiro filho do seu
+  // pai, incrementamos o contador em 1 — porque o browser insere um \n
+  // implícito entre blocos, e o innerText reflete isso. Sem essa conta,
+  // os offsets ficam descalibrados a cada quebra de linha.
+  // -----------------------------------------------------------------------
+  function resolveOffset(container, targetOffset) {
+    var pos   = 0;
+    var found = null;
+
+    var BLOCK_TAGS = {
+      div: 1, p: 1, li: 1,
+      h1: 1, h2: 1, h3: 1, h4: 1, h5: 1, h6: 1,
+      blockquote: 1, pre: 1, tr: 1
+    };
+
+    function walk(node, isFirstChild) {
+      if (found) return;
+
+      if (node.nodeType === 3) {           // nó de texto
+        var end = pos + node.length;
+        if (targetOffset >= pos && targetOffset <= end) {
+          found = { node: node, offset: targetOffset - pos };
+        }
+        pos += node.length;
+
+      } else if (node.nodeType === 1) {    // elemento
+        var tag = node.tagName.toLowerCase();
+
+        if (tag === 'br') {
+          // <br> representa 1 caractere \n no innerText
+          if (targetOffset === pos) {
+            // O alvo cai exatamente no br — usa o pai como âncora
+            found = { node: node.parentNode, offset: Array.prototype.indexOf.call(node.parentNode.childNodes, node) };
+          }
+          pos += 1;
+          return;
+        }
+
+        // Elemento de bloco que não é o primeiro filho contribui com 1 \n
+        if (!isFirstChild && BLOCK_TAGS[tag]) {
+          if (targetOffset === pos) {
+            found = { node: node, offset: 0 };
+          }
+          pos += 1;
+          if (found) return;
+        }
+
+        var first = true;
+        var children = node.childNodes;
+        for (var i = 0; i < children.length; i++) {
+          walk(children[i], first);
+          first = false;
+          if (found) return;
+        }
+      }
+    }
+
+    // Percorre os filhos diretos do container (o editor)
+    var first = true;
+    var kids  = container.childNodes;
+    for (var i = 0; i < kids.length; i++) {
+      walk(kids[i], first);
+      first = false;
+      if (found) break;
+    }
+
+    return found;
+  }
+
+  function selectMatchInEditor(match) {
+    if (!match) return;
+
+    var startResult = resolveOffset(editor, match.start);
+    var endResult   = resolveOffset(editor, match.end);
+
+    if (!startResult || !endResult) return;
+
+    try {
+      var range = document.createRange();
+      range.setStart(startResult.node, startResult.offset);
+      range.setEnd(endResult.node,     endResult.offset);
+
+      var sel = window.getSelection();
+      sel.removeAllRanges();
+      sel.addRange(range);
+
+      // Rola o editor para o centro
+      var rangeRect  = range.getBoundingClientRect();
+      var editorRect = editor.getBoundingClientRect();
+      if (rangeRect.top < editorRect.top + 20 || rangeRect.bottom > editorRect.bottom - 20) {
+        var relTop = rangeRect.top - editorRect.top + editor.scrollTop;
+        editor.scrollTop = relTop - editor.clientHeight / 2;
+      }
+    } catch(e) {
+      // Range inválido (ex: editor foi modificado entre buscas)
+    }
+  }
+
+  // -----------------------------------------------------------------------
+  // Substituir este resultado
+  // -----------------------------------------------------------------------
+  function replaceOne() {
+    if (matches.length === 0 || currentMatch < 0) return;
+    var rep   = fpReplace.value;
+    var match = matches[currentMatch];
+    // Trabalha sobre state.texts para persistir, depois re-sincroniza o editor
+    var text = state.texts[state.activeTab] || '';
+
+    // Recalcula offset em state.texts (pode diferir 1 char por \n no Edge)
+    // por segurança buscamos a ocorrência pela posição atual no innerText
+    var haystack = editor.innerText || '';
+    var needle   = haystack.substring(match.start, match.end);
+    var before   = haystack.substring(0, match.start);
+    var after    = haystack.substring(match.end);
+    var newInner = before + rep + after;
+
+    state.texts[state.activeTab] = newInner;
+    state.isDirty = true;
+    saveTabs();
+    updateEditor();
+    updateStatus();
+
+    setTimeout(findAllMatches, 0);
+  }
+
+  // -----------------------------------------------------------------------
+  // Substituir tudo
+  // -----------------------------------------------------------------------
+  function replaceAll() {
+    var needle = fpFind.value;
+    var rep    = fpReplace.value;
+    state.findText    = needle;
+    state.replaceText = rep;
+    state.findCase    = fpCase.checked;
+    if (!needle) return;
+
+    var flags = state.findCase ? 'g' : 'gi';
+    var regex;
+    try {
+      regex = new RegExp(needle.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), flags);
+    } catch(e) { return; }
+
+    var count = ((state.texts[state.activeTab] || '').match(regex) || []).length;
+    state.texts[state.activeTab] = (state.texts[state.activeTab] || '').replace(regex, rep);
+    state.isDirty = true;
+    saveTabs();
+    updateEditor();
+    updateStatus();
+
+    matches      = [];
+    currentMatch = -1;
+    updateCounter();
+
+    fpResult.style.display    = 'block';
+    fpResult.style.background = count > 0 ? '#f0fdf4' : '#fef2f2';
+    fpResult.style.border     = count > 0 ? '1px solid #86efac' : '1px solid #fca5a5';
+    fpResult.style.color      = count > 0 ? '#15803d' : '#b91c1c';
+    fpResult.textContent      = count > 0
+      ? count + ' substituição(ões) realizada(s).'
+      : 'Nenhuma ocorrência encontrada.';
+  }
+
+  // -----------------------------------------------------------------------
+  // Eventos — SEM oninput automático, só busca ao clicar ou pressionar Enter
+  // -----------------------------------------------------------------------
+  document.getElementById('fp-search').onclick = findAllMatches;
+  document.getElementById('fp-next').onclick   = function() { goToMatch(currentMatch + 1); };
+  document.getElementById('fp-prev').onclick   = function() { goToMatch(currentMatch - 1); };
+  document.getElementById('fp-rep-one').onclick = replaceOne;
+  document.getElementById('fp-rep-all').onclick  = replaceAll;
+
+  // Mudar a opção de maiúsculas invalida a busca atual
+  fpCase.onchange = function() { matches = []; currentMatch = -1; updateCounter(); };
+
+  // -----------------------------------------------------------------------
+  // Painel arrastável
+  // -----------------------------------------------------------------------
+  var titlebar = document.getElementById('fp-titlebar');
+  var dragging = false, dragOffX = 0, dragOffY = 0;
+
+  titlebar.onmousedown = function(e) {
+    if (e.target.closest('#fp-close')) return;
+    dragging = true;
+    var rect = panel.getBoundingClientRect();
+    dragOffX = e.clientX - rect.left;
+    dragOffY = e.clientY - rect.top;
+    panel.style.right = 'auto';
+    e.preventDefault();
+  };
+  window.addEventListener('mousemove', function(e) {
+    if (!dragging) return;
+    panel.style.left = (e.clientX - dragOffX) + 'px';
+    panel.style.top  = (e.clientY - dragOffY) + 'px';
+  });
+  window.addEventListener('mouseup', function() { dragging = false; });
+
+  // -----------------------------------------------------------------------
+  // Foco inicial
+  // -----------------------------------------------------------------------
+  setTimeout(function() { fpFind.focus(); fpFind.select(); }, 50);
+}
+ 
   // === Font modal ===
   function openFontModal() {
     if (state.isPlaying || state.isPaused) stopSpeech();
