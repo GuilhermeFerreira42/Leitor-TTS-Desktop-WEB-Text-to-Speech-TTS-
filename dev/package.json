@@ -1,0 +1,24 @@
+{
+  "name": "leitor-tts-desktop-web-text-to-speech-tts-",
+  "version": "1.0.0",
+  "description": "Um leitor de texto em voz alta (Text-to-Speech) para navegador, inspirado no Balabolka. Implementado como um **único arquivo HTML autocontido** — sem Node.js, sem bundler, sem build.",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/GuilhermeFerreira42/Leitor-TTS-Desktop-WEB-Text-to-Speech-TTS-.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/GuilhermeFerreira42/Leitor-TTS-Desktop-WEB-Text-to-Speech-TTS-/issues"
+  },
+  "homepage": "https://github.com/GuilhermeFerreira42/Leitor-TTS-Desktop-WEB-Text-to-Speech-TTS-#readme",
+  "devDependencies": {
+    "@playwright/test": "^1.61.1"
+  }
+}

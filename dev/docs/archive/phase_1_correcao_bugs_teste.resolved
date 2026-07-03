@@ -1,0 +1,50 @@
+# Blueprint — Fase 1: Correção Completa do TTS + Testes Playwright
+> Arquivado em: 03/07/2026
+> Status: CONCLUÍDO (5/5 testes passando)
+
+## OBJETIVO FINAL
+Corrigir os dois bugs críticos no arquivo `balabolka_web.html` e criar uma suíte de testes automatizados (Playwright) que garantam que esses bugs nunca mais retornem.
+
+## CONTEXTO DO PROJETO
+- Arquivo alvo: `balabolka_web.html` (monolito com HTML, CSS e JS inline)
+- Funcionalidade: Leitura de texto com realce sincronizado (TTS via Web Speech API)
+- Bug A: Clicar no editor APAGA o realce persistente. O realce só deve ser limpo quando o usuário editar o texto (digitar ou apagar).
+- Bug B: O realce fica desalinhado (dessincronia entre áudio e cor) em textos com quebras de linha (\n) ou múltiplos espaços.
+
+## CRITÉRIOS DE CORREÇÃO NO CÓDIGO
+
+### 1. Persistência do Realce (Bug A)
+- Remover qualquer chamada a clearReadingView() disparada por eventos de click ou focus no editor
+- Manter clearReadingView() APENAS dentro do evento input do editor
+- Ao clicar em um token (.token) no modo de leitura parada: APENAS atualizar state.lastReadTokenIdx
+- Editor deve permanecer contenteditable="true" durante todo o ciclo de vida
+
+### 2. Precisão do Realce com Quebras de Linha (Bug B)
+- remainingText deve ser exatamente a substring de state.texts[state.activeTab] a partir do índice de início
+- onboundary: usar chunkOffset + e.charIndex para posição absoluta
+- tokenMap construído usando a string original (com \n), \n contado como 1 caractere
+- spans inline dentro de um único bloco, preservando <br> existentes
+
+### 3. Scroll (Regra de Ouro)
+- PROIBIDO position: absolute, position: fixed ou camadas sobrepostas
+- Spans devem ser filhos diretos do editor ou de seus blocos naturais
+- scrollHeight não pode variar mais que 1px em relação ao texto puro
+
+## TESTES AUTOMATIZADOS (5 testes)
+
+1. Persistência ao clicar fora do token (Bug A)
+2. Scroll não é afetado pela coloração
+3. Edição (input) limpa o realce
+4. Precisão com quebra de linha (Bug B)
+5. Clique em token define ponto de retomada
+
+Configuração: Mock de window.speechSynthesis via page.addInitScript
+
+## ENTREGUES
+- balabolka_web.html corrigido
+- package.json, playwright.config.js criados
+- tests/highlight.spec.js com 5 testes
+- Suíte de documentação viva (Protocolo v2.0): 6 artefatos
+
+## RESULTADO FINAL
+5/5 testes Playwright passando consistentemente (múltiplas execuções confirmadas)

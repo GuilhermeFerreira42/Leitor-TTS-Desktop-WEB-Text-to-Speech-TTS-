@@ -1,0 +1,54 @@
+# CONTEXTO PARA IA — Balabolka Web
+
+## Resumo do Estado Atual
+- **Projeto:** Balabolka Web (Leitor-TTS-Desktop-WEB)
+- **Última fase concluída:** 1 — Correção de Bugs Críticos + Testes Automatizados
+- **Próxima fase:** 2 — a definir pelo usuário
+- **Status do build:** N/A (monolito HTML, sem build step)
+- **Status dos testes:** PASSANDO (5/5 Playwright)
+- **Principais módulos:** `playSpeech`, `stopSpeech`, `pauseSpeech`, `renderReadingMode`, `clearReadingView`, `restoreEditorMode`, `getCursorOffset`, `tokenize`, `splitTextIntoChunks`, `reapplySpeechIfPlaying`, `highlightToken`
+
+## Leitura Obrigatória (antes de qualquer tarefa)
+1. `docs/CURRENT_STATE.md` — estado atual completo do sistema (arquitetura, contratos, invariantes, restrições, testes)
+2. `balabolka_web.html` — arquivo único contendo todo o código (HTML + CSS + JS inline)
+
+## Leitura no Início de Cada Onda
+3. `docs/BACKLOG_FUTURO.md` — roadmap estratégico, critérios de aceite e CONTRATOS_DA_ONDA
+
+## Leitura Sob Demanda
+4. `docs/DECISION_LOG.md` — apenas quando precisar entender "por quê" uma decisão foi tomada
+5. `docs/phase_N_resumo.md` (se existir) — resumo executivo de fases anteriores
+6. Arquivo específico em `docs/archive/` — apenas se o usuário pedir explicitamente
+
+## NUNCA Ler Automaticamente
+- `docs/archive/*` — blueprints arquivados (auditoria humana)
+- `.git/` — controle de versão
+- `node_modules/` — artefatos de build
+- Qualquer arquivo `*.resolved`, `*.bak`, `*.old`, `*.tmp`
+
+## Workflow de Nova Fase
+1. Ler `docs/CURRENT_STATE.md` — entender onde o sistema está agora
+2. Ler `docs/BACKLOG_FUTURO.md` — confirmar qual fase é a próxima e ler `CONTRATOS_DA_ONDA`
+3. (Opcional) Ler `docs/PHASE_SUMMARY.md` da fase anterior para contexto rápido
+4. Receber o blueprint da fase do usuário
+5. Ler apenas `balabolka_web.html` e os arquivos de `tests/` que serão modificados
+6. Implementar
+7. Após validação: executar `docs/ARCHIVING_PROTOCOL.md`
+
+## Regra de Log Obrigatório
+Se qualquer artefato esperado não for encontrado (arquivo ausente, parsing falhou, dependência não resolvida):
+- NUNCA usar fallback silencioso
+- SEMPRE reportar: "Artefato [{nome}] não encontrado em [{caminho}]. Aguardando instrução."
+
+## Regra de Contrato
+Se o `CONTRATOS_DA_ONDA` do backlog estiver preenchido para a onda atual:
+- NUNCA questionar os contratos listados — eles são decisões já tomadas pelo usuário
+- Usar os contratos como fatos, não como sugestões
+- Perguntar apenas sobre o que está genuinamente em branco no bloco de contratos
+
+## Observações Específicas do Projeto
+- Projeto é um monolito: todo código está em `balabolka_web.html` (HTML + CSS + JS inline)
+- Sem backend, sem build, sem bundler — abrir no navegador é suficiente
+- Web Speech API obrigatória (Chrome/Edge); Firefox/Safari têm suporte limitado
+- Testes usam Playwright com mock de `speechSynthesis` injetado via `addInitScript`
+- localStorage é a única persistência; limpar localStorage = resetar estado

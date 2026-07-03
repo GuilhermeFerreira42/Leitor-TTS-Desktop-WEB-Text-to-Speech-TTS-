@@ -279,8 +279,6 @@
     currentTokenIdx: -1,
     originalMdTexts: LS.get('balabolka_originalMdTexts', []),
     isRenderedMd: false,
-    isInReadingView: false,   // true quando o editor está mostrando tokens coloridos após stop
-    lastReadTokenIdx: -1,     // índice do token onde a leitura parou
     // === NOVO: controle do keep-alive timer ===
     keepAliveTimer: null
   };
@@ -288,48 +286,6 @@
   // === DOM refs ===
   const $ = id => document.getElementById(id);
   const editor = $('editor');
-  // Clique num token em modo leitura parada → muda ponto de retomada
-editor.addEventListener('click', function(e) {
-  if (!state.isInReadingView) return; // Só age se estiver em modo de leitura
-
-  const token = e.target.closest('.token');
-  if (!token) {
-    // Clicou fora de um token no modo de leitura, não faz nada
-    return;
-  }
-
-  const idx = parseInt(token.dataset.idx);
-  if (isNaN(idx)) return;
-
-  // Remove .active do token anterior e adiciona .read se for antes do novo token
-  const currentActive = editor.querySelector('.token.active');
-  if (currentActive) {
-    currentActive.classList.remove('active');
-    const prevIdx = parseInt(currentActive.dataset.idx);
-    if (prevIdx < idx) {
-      currentActive.classList.add('read');
-    }
-  }
-
-  // Marca o token clicado como ativo, remove 'read' se houver
-  token.classList.remove('read');
-  token.classList.add('active');
-
-  state.lastReadTokenIdx = idx;
-  updateStatus();
-});
-
-editor.addEventListener('input', function() {
-  // Somente limpa a visão de leitura quando há uma edição real no editor
-  if (state.isInReadingView) {
-    clearReadingView();
-  }
-  state.texts[state.activeTab] = editor.innerText;
-  state.isDirty = true;
-  saveTabs();
-  updateStatus();
-  showSavedNotif();
-});
   const mdViewer = $('md-viewer');
   const tabbar = $('tabbar');
   const fileInput = $('file-input');
@@ -489,11 +445,7 @@ editor.addEventListener('input', function() {
 
   // === TTS ===
   function getPlainText() {
-    if (state.isRenderedMd) return stripMarkdown(state.texts[state.activeTab] || '');
-    // Lê diretamente do editor, que é a verdadeira fonte do momento, para evitar
-    // que o texto do state fique dessincronizado (ex: setado via Playwright)
-    const editorText = editor.innerText || '';
-    return editorText || state.texts[state.activeTab] || '';
+    return state.isRenderedMd ? stripMarkdown(state.texts[state.activeTab] || '') : state.texts[state.activeTab] || '';
   }
 
  function getCursorOffset() {
@@ -573,8 +525,6 @@ editor.addEventListener('input', function() {
   }
 
   function renderReadingMode(tokens, startIdx) {
-    // Salva a posição de scroll antes de modificar o innerHTML
-    const savedScrollTop = editor.scrollTop;
     editor.contentEditable = 'false';
     editor.style.whiteSpace = 'pre-wrap';
     editor.innerHTML = tokens.map((tok, i) => {
@@ -586,75 +536,24 @@ editor.addEventListener('input', function() {
       return '<span class="' + cls.join(' ') + '" data-idx="' + i + '">' + escapeHtml(tok) + '</span>';
     }).join('');
     applyEditorStyles();
-    // Restaura o scroll para a posição anterior
-    editor.scrollTop = savedScrollTop;
     const first = editor.querySelector('.token.active');
     if (first) {
       setTimeout(function() { first.scrollIntoView({ block: 'nearest', behavior: 'auto' }); }, 0);
     }
   }
 
-function restoreEditorMode() {
-  clearKeepAlive();
-  state.isPlaying = false;
-  state.isPaused  = false;
-
-  if (state.currentTokenIdx >= 0) {
-    // Salva a posição e mantém os tokens coloridos visíveis
-    state.lastReadTokenIdx = state.currentTokenIdx;
-    state.isInReadingView  = true;
-    // Reativa edição — o editor deve ser editável exceto durante fala ativa
+  function restoreEditorMode() {
+    clearKeepAlive(); // === NOVO: limpa timer ao restaurar ===
+    state.isPlaying = false;
+    state.isPaused = false;
+    state.currentTokenIdx = -1;
     editor.contentEditable = 'true';
-    showEditHint(true);
-  } else {
-    // Nada foi lido ainda — restaura normalmente
-    clearReadingView();
+    editor.style.whiteSpace = 'pre-wrap';
+    editor.innerText = state.texts[state.activeTab] || '';
+    applyEditorStyles();
+    updatePlayButton();
+    updateStatus();
   }
-
-  updatePlayButton();
-  updateStatus();
-}
-
-// Limpa a visão colorida e restaura o editor de texto normal
-function clearReadingView() {
-  state.isInReadingView  = false;
-  state.lastReadTokenIdx = -1;
-  state.currentTokenIdx  = -1;
-  state.readingTokens    = [];
-  editor.contentEditable = 'true';
-  editor.style.whiteSpace = 'pre-wrap';
-  editor.innerText = state.texts[state.activeTab] || '';
-  applyEditorStyles();
-  showEditHint(false);
-  updateStatus();
-}
-
-// Mostra ou esconde o botão flutuante de editar
- function showEditHint(show) {
-  var hint = document.getElementById('edit-hint');
-  if (show && !hint) {
-    hint = document.createElement('div');
-    hint.id = 'edit-hint';
-    hint.style.cssText = [
-      'position:absolute',
-      'bottom:12px',
-      'right:16px',
-      'background:rgba(0,0,0,0.65)',
-      'color:white',
-      'font-size:11px',
-      'padding:5px 12px',
-      'border-radius:4px',
-      'z-index:20',
-      'user-select:none',
-      'pointer-events:none', // não intercepta cliques — o editor inteiro já faz isso
-      'box-shadow:0 2px 8px rgba(0,0,0,0.3)'
-    ].join(';');
-    hint.textContent = '✏️ Clique no texto para editar • Clique num token para reposicionar';
-    editor.parentElement.appendChild(hint);
-  } else if (!show && hint) {
-    hint.remove();
-  }
-}
 
   function highlightToken(idx) {
     const prev = editor.querySelector('.token.active');
@@ -749,11 +648,9 @@ function clearReadingView() {
   });
 
   function loadVoices() {
-    console.log('loadVoices called');
-    if (!window.speechSynthesis) { console.log('loadVoices: no speechSynthesis'); return; }
+    if (!window.speechSynthesis) return;
     const v = window.speechSynthesis.getVoices();
-    console.log('loadVoices: got', v.length, 'voices');
-    if (!v.length) { console.log('loadVoices: no voices returned'); return; }
+    if (!v.length) return;
     state.voices = [...v.filter(function(x) { return x.lang.startsWith('pt'); }), ...v.filter(function(x) { return !x.lang.startsWith('pt'); })];
     if (!state.selectedVoiceName || !state.voices.find(function(v) { return v.name === state.selectedVoiceName; })) {
       const def = state.voices.find(function(v) { return v.lang.startsWith('pt'); }) || state.voices[0];
@@ -771,161 +668,123 @@ function clearReadingView() {
     $('no-tts').style.display = 'flex';
   }
 
-function stopSpeech() {
-  clearKeepAlive();
-  if (window.speechSynthesis) window.speechSynthesis.cancel();
-  restoreEditorMode();
-}
-
-function playSpeech() {
-  console.log('playSpeech called');
-  if (!state.ttsSupported) { console.log('playSpeech: tts not supported'); return; }
-
-  if (state.isPaused) {
-    window.speechSynthesis.resume();
-    startKeepAlive();
-    state.isPaused = false;
-    state.isPlaying = true;
-    updatePlayButton();
-    updateStatus();
-    return;
+  // =====================================================================
+  // === stopSpeech: limpa keep-alive antes de cancelar               ===
+  // =====================================================================
+  function stopSpeech() {
+    clearKeepAlive(); // === NOVO ===
+    if (window.speechSynthesis) window.speechSynthesis.cancel();
+    restoreEditorMode();
   }
 
-  var allTokens, startIdx;
-  var text = getPlainText();
-
-  var cursorOffset; // Declarado em ambos os branches
-
-  if (state.isInReadingView && state.lastReadTokenIdx >= 0) {
-    // === Retoma do ponto onde parou ===
-    startIdx  = state.lastReadTokenIdx;
-    allTokens = state.readingTokens.length > 0
-      ? state.readingTokens
-      : tokenize(text);
-    // Calcula cursorOffset a partir do startIdx para o text.substring funcionar
-    cursorOffset = allTokens.slice(0, startIdx).join('').length;
-
-    // Limpa estado de pausa sem apagar o DOM (vamos re-renderizar logo)
-    clearKeepAlive();
-    window.speechSynthesis.cancel();
-    state.isInReadingView  = false;
-    state.lastReadTokenIdx = -1;
-    showEditHint(false);
-
-  } else {
-    // === Início normal pelo cursor ===
-    cursorOffset = getCursorOffset();
-
-    // Para qualquer fala anterior (sem salvar posição, pois estamos reiniciando)
-    clearKeepAlive();
-    window.speechSynthesis.cancel();
-    if (state.isInReadingView) {
-      state.isInReadingView  = false;
-      state.lastReadTokenIdx = -1;
-      showEditHint(false);
-    }
-
-    allTokens = tokenize(text);
-    startIdx  = findStartToken(allTokens, cursorOffset);
-  }
-
-  let fullTextToSpeak = text.substring(cursorOffset); // Use original text substring
-  let tokensToSpeak   = allTokens.slice(startIdx);
-
-  if (!fullTextToSpeak.trim()) {
-    // Se não sobrou nada (chegou ao fim), recomeça do início
-    startIdx        = 0;
-    cursorOffset    = 0;
-    allTokens       = tokenize(text);
-    tokensToSpeak   = allTokens;
-    fullTextToSpeak = text;
-    if (!fullTextToSpeak.trim()) return;
-  }
-
-  state.readingTokens  = allTokens;
-  state.readingStartIdx = startIdx;
-  state.isPlaying      = true;
-  state.currentTokenIdx = -1;
-  renderReadingMode(allTokens, startIdx);
-
-  // Divide em chunks para leitura contínua no Chrome/Edge
-  const chunks = splitTextIntoChunks(fullTextToSpeak, 3000);
-
-  // Mapeia tokens para posições de caractere ABSOLUTAS no 'text' original (não 'fullTextToSpeak')
-  let charMapAcc = 0;
-  const tokenMap  = [];
-  for (let i = 0; i < allTokens.length; i++) {
-    // Somente tokens que serão lidos
-    if (i >= startIdx) {
-      tokenMap.push({
-        start: charMapAcc,
-        end: charMapAcc + allTokens[i].length,
-        idx: i
-      });
-    }
-    charMapAcc += allTokens[i].length;
-  }
-
-  let globalCharOffsetInChunkedText = 0; // Offset para o texto chunkado que a API está lendo
-  let lastTokenIdx     = -1;
-
-  function speakChunk(chunkIndex) {
-    if (chunkIndex >= chunks.length || !state.isPlaying) {
-      restoreEditorMode();
+  // =====================================================================
+  // === playSpeech: usa chunking + keep-alive para leitura contínua  ===
+  // =====================================================================
+  function playSpeech() {
+    if (!state.ttsSupported) return;
+    if (state.isPaused) {
+      window.speechSynthesis.resume();
+      startKeepAlive(); // === NOVO: retoma o keep-alive ao despausar ===
+      state.isPaused = false;
+      state.isPlaying = true;
+      updatePlayButton();
+      updateStatus();
       return;
     }
 
-    var chunk = chunks[chunkIndex];
-    var utter = new SpeechSynthesisUtterance(chunk);
-    var voice = state.voices.find(function(v) { return v.name === state.selectedVoiceName; })
-                || state.voices.find(function(v) { return v.lang.startsWith('pt'); })
-                || state.voices[0];
-    if (voice) { utter.voice = voice; utter.lang = voice.lang; }
-    utter.rate   = state.rate;
-    utter.pitch  = state.pitch;
-    utter.volume = state.volume;
+    // Captura posição do cursor ANTES de interromper a fala
+    const cursorOffset = getCursorOffset();
+    stopSpeech();
+    const text = getPlainText();
+    if (!text.trim()) return;
 
-    var chunkOffset = globalCharOffsetInChunkedText;
+    const allTokens = tokenize(text);
+    const startIdx = findStartToken(allTokens, cursorOffset);
+    const remainingText = allTokens.slice(startIdx).join('');
+    if (!remainingText.trim()) return;
 
-    utter.onstart = function() { startKeepAlive(); };
+    state.readingTokens = allTokens;
+    state.readingStartIdx = startIdx;
+    state.isPlaying = true;
+    renderReadingMode(allTokens, startIdx);
 
-    utter.onboundary = function(e) {
-      if (e.name !== 'word') return;
-      var absCharIndex = cursorOffset + chunkOffset + e.charIndex;
-      var activeIdx = -1;
-      for (var t = 0; t < tokenMap.length; t++) {
-        if (absCharIndex >= tokenMap[t].start && absCharIndex < tokenMap[t].end) {
-          activeIdx = tokenMap[t].idx;
-          break;
-        }
-      }
-      if (activeIdx !== -1 && activeIdx !== lastTokenIdx) {
-        lastTokenIdx = activeIdx;
-        highlightToken(activeIdx);
-      }
-    };
+    // === NOVO: divide o texto em chunks para leitura contínua ===
+    const chunks = splitTextIntoChunks(remainingText, 3000);
 
-    utter.onend = function() {
-      clearKeepAlive();
-      globalCharOffsetInChunkedText += chunk.length;
-      speakChunk(chunkIndex + 1);
-    };
+    // Mapa de tokens com posição de caractere acumulada
+    let charCount = 0;
+    const tokenMap = [];
+    for (let i = startIdx; i < allTokens.length; i++) {
+      tokenMap.push({ start: charCount, end: charCount + allTokens[i].length, idx: i });
+      charCount += allTokens[i].length;
+    }
 
-    utter.onerror = function(e) {
-      clearKeepAlive();
-      if (e.error !== 'interrupted' && e.error !== 'canceled') {
+    let globalCharOffset = 0; // offset acumulado de chunks já lidos
+    let lastTokenIdx = -1;
+
+    // === NOVO: função recursiva que fala um chunk e encadeia o próximo ===
+    function speakChunk(chunkIndex) {
+      // Se acabou todos os chunks ou o usuário parou: encerra
+      if (chunkIndex >= chunks.length || !state.isPlaying) {
         restoreEditorMode();
+        return;
       }
-    };
 
-    window.speechSynthesis.speak(utter);
-    state.currentUtterance = utter;
+      const chunk = chunks[chunkIndex];
+      const utter = new SpeechSynthesisUtterance(chunk);
+      const voice = state.voices.find(function(v) { return v.name === state.selectedVoiceName; })
+                    || state.voices.find(function(v) { return v.lang.startsWith('pt'); })
+                    || state.voices[0];
+      if (voice) { utter.voice = voice; utter.lang = voice.lang; }
+      utter.rate   = state.rate;
+      utter.pitch  = state.pitch;
+      utter.volume = state.volume;
+
+      const chunkOffset = globalCharOffset;
+
+      // === NOVO: inicia keep-alive quando o chunk começa a ser falado ===
+      utter.onstart = function() {
+        startKeepAlive();
+      };
+
+      utter.onboundary = function(e) {
+        if (e.name !== 'word') return;
+        const absCharIndex = chunkOffset + e.charIndex;
+        let activeIdx = -1;
+        for (let t = 0; t < tokenMap.length; t++) {
+          if (absCharIndex >= tokenMap[t].start && absCharIndex < tokenMap[t].end) {
+            activeIdx = tokenMap[t].idx;
+            break;
+          }
+        }
+        if (activeIdx !== -1 && activeIdx !== lastTokenIdx) {
+          lastTokenIdx = activeIdx;
+          highlightToken(activeIdx);
+        }
+      };
+
+      // === NOVO: ao terminar um chunk, encadeia automaticamente o próximo ===
+      utter.onend = function() {
+        clearKeepAlive();
+        globalCharOffset += chunk.length;
+        speakChunk(chunkIndex + 1);
+      };
+
+      utter.onerror = function(e) {
+        clearKeepAlive();
+        if (e.error !== 'interrupted' && e.error !== 'canceled') {
+          restoreEditorMode();
+        }
+      };
+
+      window.speechSynthesis.speak(utter);
+      state.currentUtterance = utter;
+    }
+
+    speakChunk(0); // Começa pelo primeiro chunk
+    updatePlayButton();
+    updateStatus();
   }
-
-  speakChunk(0);
-  updatePlayButton();
-  updateStatus();
-}
 
   // =====================================================================
   // === pauseSpeech: para o keep-alive durante a pausa               ===
@@ -956,29 +815,16 @@ function playSpeech() {
     if (!remainingText.trim()) return;
 
     // === NOVO: também usa chunks ao reaplicar ===
-    // cursorOffsetReapply: total chars before startIdx in all readingTokens
-    var cursorOffsetReapply = 0;
-    for (var rti = 0; rti < startIdx; rti++) {
-      cursorOffsetReapply += state.readingTokens[rti].length;
-    }
-    const fullTextToSpeakReapply = state.texts[state.activeTab].substring(cursorOffsetReapply);
-    const chunks = splitTextIntoChunks(fullTextToSpeakReapply, 3000);
+    const chunks = splitTextIntoChunks(remainingText, 3000);
 
-    // Mapeia tokens para posições de caractere ABSOLUTAS no 'text' original (não 'fullTextToSpeakReapply')
-    let charMapAcc = 0;
+    let charCount = 0;
     const tokenMap = [];
-    for (let i = 0; i < state.readingTokens.length; i++) {
-      if (i >= startIdx) {
-        tokenMap.push({
-          start: charMapAcc,
-          end: charMapAcc + state.readingTokens[i].length,
-          idx: i
-        });
-      }
-      charMapAcc += state.readingTokens[i].length;
+    for (let i = startIdx; i < state.readingTokens.length; i++) {
+      tokenMap.push({ start: charCount, end: charCount + state.readingTokens[i].length, idx: i });
+      charCount += state.readingTokens[i].length;
     }
 
-    let globalCharOffsetInChunkedText = 0;
+    let globalCharOffset = 0;
     let lastTokenIdx = -1;
 
     function speakChunk(chunkIndex) {
@@ -997,31 +843,22 @@ function playSpeech() {
       utter.pitch  = state.pitch;
       utter.volume = state.volume;
 
-      const chunkOffset = globalCharOffsetInChunkedText; // Usar o offset correto para o chunk
+      const chunkOffset = globalCharOffset;
 
       utter.onstart = function() {
-        startKeepAlive();
+        startKeepAlive(); // === NOVO ===
       };
 
       utter.onboundary = function(e) {
         if (e.name !== 'word') return;
-        var prefixLenReapply = 0;
-        for (var rti2 = 0; rti2 < startIdx; rti2++) {
-          prefixLenReapply += state.readingTokens[rti2].length;
-        }
-        const absCharIndexInFullText = prefixLenReapply + chunkOffset + e.charIndex;
-        
+        const absCharIndex = chunkOffset + e.charIndex;
         let activeIdx = -1;
-        let currentAbsCharAcc = 0;
-        for (let t = 0; t < state.readingTokens.length; t++) {
-            const tokenLength = state.readingTokens[t].length;
-            if (absCharIndexInFullText >= currentAbsCharAcc && absCharIndexInFullText < currentAbsCharAcc + tokenLength) {
-                activeIdx = t;
-                break;
-            }
-            currentAbsCharAcc += tokenLength;
+        for (let t = 0; t < tokenMap.length; t++) {
+          if (absCharIndex >= tokenMap[t].start && absCharIndex < tokenMap[t].end) {
+            activeIdx = tokenMap[t].idx;
+            break;
+          }
         }
-
         if (activeIdx !== -1 && activeIdx !== lastTokenIdx) {
           lastTokenIdx = activeIdx;
           highlightToken(activeIdx);
@@ -1029,8 +866,8 @@ function playSpeech() {
       };
 
       utter.onend = function() {
-        clearKeepAlive();
-        globalCharOffsetInChunkedText += chunk.length;
+        clearKeepAlive(); // === NOVO ===
+        globalCharOffset += chunk.length;
         speakChunk(chunkIndex + 1);
       };
 
@@ -1110,7 +947,6 @@ function playSpeech() {
   function switchTab(i) {
     if (i === state.activeTab) return;
     if (state.isPlaying || state.isPaused) stopSpeech();
-    if (state.isInReadingView) clearReadingView();
     state.texts[state.activeTab] = editor.innerText;
     state.activeTab = i;
     LS.set('balabolka_activeTab', i);
@@ -1119,7 +955,6 @@ function playSpeech() {
 
   function addTab() {
     if (state.isPlaying || state.isPaused) stopSpeech();
-    if (state.isInReadingView) clearReadingView();
     state.texts.push('');
     state.tabs.push('Documento' + (state.tabs.length + 1));
     state.activeTab = state.tabs.length - 1;
@@ -1129,7 +964,6 @@ function playSpeech() {
   function closeTab(i) {
     if (state.tabs.length === 1) return;
     if (state.isPlaying || state.isPaused) stopSpeech();
-    if (state.isInReadingView) clearReadingView();
     state.tabs.splice(i, 1);
     state.texts.splice(i, 1);
     if (state.activeTab >= i) state.activeTab = Math.max(0, state.activeTab - 1);
@@ -1138,7 +972,6 @@ function playSpeech() {
 
   function closeAllTabs() {
     if (state.isPlaying || state.isPaused) stopSpeech();
-    if (state.isInReadingView) clearReadingView();
     state.tabs = ['Documento1'];
     state.texts = [''];
     state.activeTab = 0;
@@ -1147,7 +980,6 @@ function playSpeech() {
 
   function closeOtherTabs() {
     if (state.isPlaying || state.isPaused) stopSpeech();
-    if (state.isInReadingView) clearReadingView();
     const curText = state.texts[state.activeTab];
     const curTab = state.tabs[state.activeTab];
     state.tabs = [curTab];
@@ -1172,18 +1004,16 @@ function playSpeech() {
   }
 
   function updateEditor() {
-    if (state.isPlaying || state.isPaused || state.isInReadingView) return;
-    var text = state.texts[state.activeTab] || '';
+    if (state.isPlaying || state.isPaused) return;
+    const text = state.texts[state.activeTab] || '';
     if (state.isRenderedMd) {
-      editor.style.display   = 'none';
-      mdViewer.style.display = 'block';
-      mdViewer.innerHTML     = renderMarkdown(text);
+      editor.style.display = 'none'; mdViewer.style.display = 'block';
+      mdViewer.innerHTML = renderMarkdown(text);
     } else {
-      editor.style.display   = 'block';
-      mdViewer.style.display = 'none';
+      editor.style.display = 'block'; mdViewer.style.display = 'none';
       editor.contentEditable = 'true';
       editor.style.whiteSpace = 'pre-wrap';
-      editor.innerText       = text;
+      editor.innerText = text;
     }
     applyEditorStyles();
   }
@@ -1235,7 +1065,14 @@ function playSpeech() {
   }
 
   // === Editor events ===
-  // (The input handler is now attached via addEventListener above — which includes clearReadingView)
+  editor.oninput = function() {
+    if (state.isPlaying || state.isPaused) return;
+    state.texts[state.activeTab] = editor.innerText;
+    state.isDirty = true;
+    saveTabs();
+    updateStatus();
+    showSavedNotif();
+  };
 
   let savedTimer = null;
   function showSavedNotif() {
@@ -2011,10 +1848,6 @@ function playSpeech() {
 
   // === Init ===
   updateEditor(); renderTabs(); updateTitle(); updateStatus();
-
-  // Debug: expose playSpeech globally
-  window.playSpeech = playSpeech;
-  console.log('Balabolka init complete. state.ttsSupported:', state.ttsSupported, 'voices:', state.voices.length);
 })();
   </script>
 </body>

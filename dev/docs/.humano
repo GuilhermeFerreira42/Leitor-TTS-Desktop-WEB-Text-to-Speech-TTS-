@@ -1,0 +1,105 @@
+SOBRE O SEU WORKFLOW — LEIA ANTES DE INICIAR QUALQUER FASE
+══════════════════════════════════════════════════════════
+
+O QUE ESTE ARQUIVO RESOLVE
+────────────────────────────────────────────────────────
+Antes (desperdiçava tokens e gerava perguntas evitáveis):
+  "Leia todo o projeto e implemente a fase X"
+  → IA lê 50.000+ tokens de arquivos irrelevantes
+  → Consome 70% do contexto só para carregar
+  → O NEXUS faz perguntas sobre decisões que você já tomou
+    mas que nunca foram escritas em lugar nenhum
+  → Resultado: blueprint incompleto ou cheio de interrupções
+
+Depois (otimizado com v2.0):
+  → Você preenche CONTRATOS_DA_ONDA antes de disparar a execução
+  → IA lê ~2.000 tokens de estado + contratos + blueprint
+  → IA lê apenas o arquivo que vai modificar (balabolka_web.html)
+  → IA gera sem interrupções porque as respostas já chegam nela
+  → 90%+ do contexto disponível para implementação real
+  → A documentação viva é auto-suficiente: qualquer nova IA entende o projeto sem conversas externas
+
+────────────────────────────────────────────────────────
+FLUXO PADRÃO DE CADA ONDA
+══════════════════════
+
+ANTES DE INICIAR UMA ONDA (você faz isso):
+  1. Abra docs/BACKLOG_FUTURO.md
+  2. Preencha o bloco CONTRATOS_DA_ONDA para a onda que vai começar:
+     - OUTPUT_SCHEMAS: o formato exato de output de cada componente
+     - ESCOPO_CONGELADO: arquivos que não podem ser tocados
+     - ARQUIVOS_A_DELETAR: o que será removido nesta onda
+     - REESCRITAS: TOTAL ou INCREMENTAL para cada componente
+     - DECISOES_EXTRAS: qualquer decisão que você já tomou em conversa
+
+  REGRA CHAVE: se você decidiu algo numa conversa com a IA mas não
+  escreveu aqui, a IA vai perguntar. Se escreveu aqui, não pergunta.
+
+────────────────────────────────────────────────────────
+FLUXO PADRÃO DE CADA FASE (dentro de uma onda)
+══════════════════════════════════════════════
+
+PASSO 1 — Gere o blueprint da fase com o NEXUS:
+  "Aqui está o CURRENT_STATE.md: [conteúdo]
+   Aqui está o BACKLOG_FUTURO.md (com CONTRATOS_DA_ONDA preenchido): [conteúdo]
+   Gere o blueprint completo da Fase N usando o NEXUS Protocol."
+
+PASSO 2 — Revise o blueprint gerado
+
+PASSO 3 — Dispare a implementação:
+  "Leia .ai-context e docs/CURRENT_STATE.md.
+   A próxima fase é [Fase N] — [nome].
+   Aqui está o blueprint: [cola ou indica o arquivo].
+   Implemente."
+
+PASSO 4 — Valide (rode os testes, execute manualmente)
+
+PASSO 5 — Arquive:
+  "Fase N concluída e validada.
+   Execute o protocolo docs/ARCHIVING_PROTOCOL.md."
+
+PASSO 6 — IA executa o arquivamento:
+  → Verifica e reporta resultado dos testes
+  → Atualiza CURRENT_STATE + DECISION_LOG + BACKLOG_FUTURO
+  → (Opcional) Cria PHASE_SUMMARY.md
+  → Arquiva blueprint como .resolved
+  → Sugere mensagem de commit
+
+PASSO 7 — Você faz o commit. Próxima fase começa com contexto limpo.
+
+────────────────────────────────────────────────────────
+SITUAÇÕES ESPECIAIS
+═══════════════════
+
+QUANDO A IA PRECISAR VER CÓDIGO QUE NÃO VAI MODIFICAR:
+  Diga: "Consulte o DECISION_LOG para entender por que [módulo] funciona assim"
+  Não faça ela ler o arquivo inteiro.
+
+QUANDO UM ARTEFATO NÃO FOR ENCONTRADO:
+  A IA deve parar e reportar — nunca usar fallback silencioso.
+  Correto:  "Artefato [nome] não encontrado em [caminho]. Aguardando instrução."
+  Errado:   [injeta contexto geral sem avisar e continua silenciosamente]
+
+QUANDO OS TESTES FALHAREM:
+  A IA não arquiva. Reporta a falha e aguarda.
+  O arquivamento pressupõe suíte de testes passando integralmente.
+
+QUANDO A IA FIZER PERGUNTAS QUE VOCÊ JÁ RESPONDEU:
+  Isso significa que a decisão não está no CONTRATOS_DA_ONDA.
+  Responda à pergunta E adicione a resposta ao bloco de contratos
+  para que a próxima fase não precise repetir a pergunta.
+
+QUANDO UMA DECISÃO MUDAR DURANTE A IMPLEMENTAÇÃO:
+  Atualize CONTRATOS_DA_ONDA imediatamente.
+  Não deixe o backlog desatualizado — ele é a fonte de verdade.
+
+────────────────────────────────────────────────────────
+HISTÓRICO DE FASES
+═══════════════════
+
+FASE 1 — Correção de Bugs Críticos + Testes Automatizados (03/07/2026)
+  → Bug A corrigido: persistência do realce ao clicar no editor
+  → Bug B corrigido: precisão do realce com quebras de linha
+  → 5 testes Playwright criados e passando
+  → Documentação viva inicializada (6 artefatos do Protocolo v2.0)
+  → Aguardando definição da Fase 2 pelo usuário
