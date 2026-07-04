@@ -21,7 +21,7 @@ Depois (otimizado com v2.0):
 
 ────────────────────────────────────────────────────────
 FLUXO PADRÃO DE CADA ONDA
-══════════════════════
+═══════════════════════
 
 ANTES DE INICIAR UMA ONDA (você faz isso):
   1. Abra docs/BACKLOG_FUTURO.md
@@ -37,7 +37,7 @@ ANTES DE INICIAR UMA ONDA (você faz isso):
 
 ────────────────────────────────────────────────────────
 FLUXO PADRÃO DE CADA FASE (dentro de uma onda)
-══════════════════════════════════════════════
+═══════════════════════════════════════════════
 
 PASSO 1 — Gere o blueprint da fase com o NEXUS:
   "Aqui está o CURRENT_STATE.md: [conteúdo]
@@ -97,9 +97,24 @@ QUANDO UMA DECISÃO MUDAR DURANTE A IMPLEMENTAÇÃO:
 HISTÓRICO DE FASES
 ═══════════════════
 
+FASE 0 — Planejamento (data a definir)
+  → Projeto monolito HTML, Web Speech API, localStorage, tokenização split(/(\s+)/), chunking 3000 chars
+  → 8 decisões base documentadas em DECISION_LOG
+
 FASE 1 — Correção de Bugs Críticos + Testes Automatizados (03/07/2026)
-  → Bug A corrigido: persistência do realce ao clicar no editor
-  → Bug B corrigido: precisão do realce com quebras de linha
-  → 5 testes Playwright criados e passando
+  → Bug A corrigido: persistência do realce ao clicar no editor (clearReadingView só em input/dblclick)
+  → Bug B corrigido: precisão do realce com quebras de linha (tokenMap com \n, onboundary com chunkOffset)
+  → 5 testes Playwright criados e passando (Persistência, Scroll, Edição, Quebra de linha, Retomada)
   → Documentação viva inicializada (6 artefatos do Protocolo v2.0)
   → Aguardando definição da Fase 2 pelo usuário
+
+FASE 2 — Correção de 3 Bugs de Sincronização + Testes de Regressão (04/07/2026)
+  → Bug 1 corrigido: realce prematuro — renderReadingMode NÃO aplica .active antecipado; primeiro highlight via onboundary
+  → Bug 2 corrigido: cursor em linha vazia — skipWhitespaceTokens pula whitespace até /\S/; integrado em playSpeech
+  → Bug 3 corrigido: texto escrito no início — clearReadingView extrai texto dos spans (textContent), restaura cursor via lastReadTokenIdx + tree-walk
+  → 2 novos módulos: skipWhitespaceTokens, findStartToken
+  → 3 novos testes Playwright: Bug 3 (edição não reseta), Bug 2 (linha vazia), Bug 1 (verificação síncrona)
+  → Total: 8/8 testes passando (5 Fase 1 + 3 Fase 2)
+  → 10 invariantes globais documentadas em CURRENT_STATE.md
+  → Documentação viva atualizada (CURRENT_STATE, DECISION_LOG, BACKLOG_FUTURO, .ai-context, .humano, phase_2_resumo.md)
+  → Aguardando definição da Fase 3 pelo usuário

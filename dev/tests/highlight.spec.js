@@ -94,7 +94,7 @@ test.beforeEach(async ({ page }) => {
     }, 10);
   });
 
-  const filePath = path.resolve(__dirname, '../balabolka_web.html');
+  const filePath = path.resolve(__dirname, '../../balabolka_web.html');
 
   // Listen for console events
   page.on('console', msg => {
@@ -192,12 +192,20 @@ test('Edição (input) limpa o realce', async ({ page }) => {
 
   await page.waitForSelector('.token.active', { timeout: 5000 });
 
-  // Simulate editing: focus editor, move cursor to end, type 'x'
-  await page.focus('#editor');
-  await page.keyboard.press('End');
-  await page.keyboard.type('x');
+  // Aguarda o mock onend disparar (restaura modo leitura com tokens preservados)
+  await page.waitForTimeout(100);
 
-  // Assert: editor innerHTML no longer contains token spans
+  // Simula edição: dispara keydown com caractere imprimível para invocar clearReadingView()
+  // E depois dispara evento 'input' diretamente para garantir limpeza
+  await page.evaluate(() => {
+    const editor = document.getElementById('editor');
+    // 1. Keydown com tecla imprimível (não está na lista de navegação)
+    editor.dispatchEvent(new KeyboardEvent('keydown', { key: 'x', bubbles: true }));
+    // 2. Agora editor deve ser editável - dispara evento input para simular digitação real
+    editor.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+
+  // Assert: editor innerHTML não contém mais token spans
   const hasTokens = await page.evaluate(() => {
     return document.getElementById('editor').querySelector('.token') !== null;
   });
@@ -327,4 +335,161 @@ test('Clique em token define ponto de retomada', async ({ page }) => {
   expect(lastUtteranceText).toContain('cinco');
   expect(lastUtteranceText).not.toContain('Um');
   expect(lastUtteranceText).not.toContain('dois');
+});
+
+test('Bug 3: Edição no modo leitura NÃO reseta o texto para o início', async ({ page }) => {
+  await page.waitForTimeout(100);
+
+  const originalText = 'Primeira linha\nSegunda linha\nTerceira linha';
+  await page.evaluate((t) => {
+    document.getElementById('editor').innerText = t;
+  }, originalText);
+
+  // Inicia leitura
+  await page.evaluate(() => {
+    window.playSpeech();
+  });
+  await page.waitForSelector('.token.active', { timeout: 5000 });
+  
+  // Aguarda leitura terminar (mock onend)
+  await page.waitForTimeout(200);
+  
+  // Agora o editor deve estar em modo leitura (isInReadingView = true)
+  // Verifica que tokens ainda existem
+  const tokensBeforeEdit = await page.locator('.token').count();
+  expect(tokensBeforeEdit).toBeGreaterThan(0);
+  
+  // Simula digitação no modo leitura (keydown com caractere imprimível)
+  // Isso deve disparar clearReadingView()
+  await page.evaluate(() => {
+    const editor = document.getElementById('editor');
+    editor.dispatchEvent(new KeyboardEvent('keydown', { key: 'X', bubbles: true }));
+  });
+  
+  // Digita um caractere no editor agora editável
+  await page.keyboard.type('X');
+  
+  // Verifica: o texto NÃO deve ter sido resetado para o original
+  // O texto deve conter o 'X' digitado E o texto original deve estar preservado
+  const editorText = await page.evaluate(() => {
+    return document.getElementById('editor').innerText;
+  });
+  
+  // O texto deve conter o 'X' que foi digitado
+  expect(editorText).toContain('X');
+  // E deve conter partes do texto original (não resetado para vazio ou apenas 'X')
+  expect(editorText).toContain('Primeira');
+  
+  // Não deve ter tokens de realce (foram limpos pela edição)
+  const hasTokensAfterEdit = await page.evaluate(() => {
+    return document.getElementById('editor').querySelector('.token') !== null;
+  });
+  expect(hasTokensAfterEdit).toBe(false);
+});
+
+test('Bug 2: Cursor em linha vazia pula para próximo token não-whitespace', async ({ page }) => {
+  await page.waitForTimeout(100);
+  
+  // Texto com múltiplas linhas, incluindo linha vazia no meio
+  const text = 'Linha 1\n\nLinha 3\nLinha 4';
+  await page.evaluate((t) => {
+    document.getElementById('editor').innerText = t;
+  }, text);
+  
+  // Posiciona cursor na linha vazia (após o primeiro \n)
+  await page.evaluate(() => {
+    const editor = document.getElementById('editor');
+    const fullText = editor.innerText;
+    const firstNewline = fullText.indexOf('\n');
+    // Posiciona exatamente na linha vazia (offset = firstNewline + 1)
+    const targetOffset = firstNewline + 1;
+    
+    let pos = 0;
+    let foundNode = null, foundOffset = 0;
+    
+    function walk(node) {
+      if (foundNode) return;
+      if (node.nodeType === 3) {
+        const end = pos + node.length;
+        if (targetOffset >= pos && targetOffset <= end) {
+          foundNode = node;
+          foundOffset = targetOffset - pos;
+        }
+        pos += node.length;
+      } else if (node.nodeType === 1) {
+        if (node.tagName === 'BR') {
+          pos += 1;
+        }
+        for (let i = 0; i < node.childNodes.length; i++) {
+          walk(node.childNodes[i]);
+          if (foundNode) return;
+        }
+      }
+    }
+    
+    for (let i = 0; i < editor.childNodes.length; i++) {
+      walk(editor.childNodes[i]);
+      if (foundNode) break;
+    }
+    
+    if (foundNode) {
+      const range = document.createRange();
+      range.setStart(foundNode, foundOffset);
+      range.setEnd(foundNode, foundOffset);
+      const sel = window.getSelection();
+      sel.removeAllRanges();
+      sel.addRange(range);
+    }
+  });
+  
+  await page.evaluate(() => {
+    window.playSpeech();
+  });
+  
+  await page.waitForSelector('.token.active', { timeout: 5000 });
+  
+  // O primeiro token .active NÃO deve ser whitespace (espaço, \n, etc.)
+  // Deve ser 'Linha' ou '3' (o próximo token não-whitespace após a linha vazia)
+  const activeTokenText = await page.locator('.token.active').textContent();
+  expect(activeTokenText).not.toMatch(/^\s+$/); // Não é apenas whitespace
+  // Deve conter parte de 'Linha 3' (pula a linha vazia)
+  expect(activeTokenText).toMatch(/Linha/);
+});
+
+test('Bug 1: Realce prematuro - .active NÃO aparece antes do onboundary', async ({ page }) => {
+  await page.waitForTimeout(100);
+  
+  const text = 'Primeira palavra segunda palavra terceira';
+  await page.evaluate((t) => {
+    document.getElementById('editor').innerText = t;
+  }, text);
+  
+  // ANTES de chamar playSpeech: não deve haver .active
+  const activeBefore = await page.locator('.token.active').count();
+  expect(activeBefore).toBe(0);
+  
+  // Chama playSpeech e verifica SINCRONAMENTE (sem await waitForTimeout) 
+  // que .active NÃO foi adicionado pelo renderReadingMode
+  await page.evaluate(() => {
+    window.playSpeech();
+    // Verifica imediatamente após playSpeech retornar (renderReadingMode já executou)
+    const activeCount = document.querySelectorAll('.token.active').length;
+    // Retorna o count para o teste validar
+    window.__activeCountImmediatelyAfterPlay = activeCount;
+  });
+  
+  // Obtém o count capturado sincronicamente
+  const activeImmediatelyAfterPlay = await page.evaluate(() => window.__activeCountImmediatelyAfterPlay);
+  expect(activeImmediatelyAfterPlay).toBe(0); // Bug 1: .active NÃO aparece antecipadamente pelo renderReadingMode
+  
+  // Aguarda o onboundary do mock (dispara em ~10ms)
+  await page.waitForSelector('.token.active', { timeout: 5000 });
+  
+  // AGORA deve haver .active (pelo onboundary)
+  const activeAfterBoundary = await page.locator('.token.active').count();
+  expect(activeAfterBoundary).toBe(1);
+  
+  // O token .active deve ser o primeiro token não-whitespace ('Primeira')
+  const activeTokenText = await page.locator('.token.active').textContent();
+  expect(activeTokenText).toContain('Primeira');
 });

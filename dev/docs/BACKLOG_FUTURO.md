@@ -2,7 +2,7 @@
 
 ## Intenção Original
 - **Objetivo:** Leitor de texto em voz alta (TTS) para navegador, inspirado no Balabolka, com realce sincronizado palavra-por-palavra, suporte a múltiplas abas, markdown, e operação 100% offline.
-- **Estado Atual:** Após Fase 1 — Dois bugs críticos corrigidos (persistência do realce e precisão com quebras de linha), suíte de testes automatizados com 5 testes passando, documentação viva inicializada.
+- **Estado Atual:** Após Fase 2 — Cinco bugs críticos corrigidos (Bug A, B da Fase 1 + Bug 1, 2, 3 da Fase 2), suíte de testes automatizados com 8 testes passando, documentação viva atualizada.
 - **Meta Final:** Aplicação web completa e robusta, com todos os bugs de sincronização eliminados, cobertura de testes abrangente, e documentação auto-suficiente para qualquer IA ou desenvolvedor retomar o projeto.
 
 ---
@@ -61,6 +61,65 @@ DECISOES_EXTRAS:
   - Mock de speechSynthesis usa setTimeout encadeados (5ms, 10ms, 20ms) para simular eventos assíncronos
   - Testes usam window.playSpeech() diretamente em vez de click no botão para evitar problemas de seletor
   - Tolerância de scrollHeight: 1px (diferenças de subpixel rendering entre navegadores)
+```
+
+---
+
+## Onda 2 — Correção de Bugs de Sincronização Avançados + Testes de Regressão
+> Pré-requisito: Onda 1 concluída
+
+### Itens
+
+| ID | Entregável | Descrição (entregue ou planejada) | Arquivos Impactados | Critério de Aceite | Status |
+|----|------------|-----------------------------------|----------------------|---------------------|--------|
+| W2-01 | Correção Bug 1: Realce prematuro (dessincronia token) | `renderReadingMode` não aplica mais `.active` no token `startIdx` antecipadamente; primeiro highlight vem exclusivamente do `onboundary` → `highlightToken`. | `balabolka_web.html` | Teste "Bug 1: Realce prematuro - .active NÃO aparece antes do onboundary" passa (verificação síncrona) | CONCLUÍDO |
+| W2-02 | Correção Bug 2: Cursor em linha vazia (indexação offset) | Adicionada `skipWhitespaceTokens(tokens, startIdx)` que avança até `/\S/`; integrada em ambos branches de `playSpeech` (retomada e início normal). | `balabolka_web.html` | Teste "Bug 2: Cursor em linha vazia pula para próximo token não-whitespace" passa (.active não é whitespace) | CONCLUÍDO |
+| W2-03 | Correção Bug 3: Texto escrito no início (persistência estado) | `clearReadingView()` reescrita: extrai texto real dos spans via `.textContent` antes de limpar, calcula `cursorCharOffset` via `lastReadTokenIdx`, restaura cursor via tree-walk, atualiza `state.texts[]`. | `balabolka_web.html` | Teste "Bug 3: Edição no modo leitura NÃO reseta o texto para o início" passa (texto preservado + cursor correto) | CONCLUÍDO |
+| W2-04 | Módulo `skipWhitespaceTokens` | Nova função utilitária: avança índice até primeiro token não-whitespace (`/\S/`). | `balabolka_web.html` | Usada por `playSpeech` em ambos branches | CONCLUÍDO |
+| W2-05 | Módulo `findStartToken` | Nova função utilitária: mapeia offset de caractere para índice de token (extraído da lógica inline de `playSpeech`). | `balabolka_web.html` | Usada por `playSpeech`; testável isoladamente | CONCLUÍDO |
+| W2-06 | Teste automatizado: Bug 3 — Edição não reseta texto | Lê texto, aguarda onend (modo leitura parada), simula keydown+input, verifica texto preservado + cursor na posição + tokens removidos. | `tests/highlight.spec.js` | 3 asserções: texto contém 'X', contém 'Primeira', sem spans .token | CONCLUÍDO |
+| W2-07 | Teste automatizado: Bug 2 — Cursor linha vazia pula whitespace | Texto com `\n\n`, posiciona cursor na linha vazia, clica Ler, verifica `.active` não é whitespace e contém "Linha". | `tests/highlight.spec.js` | `.active` textContent não match `^\s+$` e contém "Linha" | CONCLUÍDO |
+| W2-08 | Teste automatizado: Bug 1 — Realce prematuro | Verificação síncrona pós-`playSpeech`: 0 `.active`; após `onboundary` mock: 1 `.active` com "Primeira". | `tests/highlight.spec.js` | Sem race condition; valida estado exato | CONCLUÍDO |
+| W2-09 | Atualização documentação viva (Fase 2) | CURRENT_STATE (10 invariantes, 8 testes, 2 novos módulos), DECISION_LOG (10 linhas Fase 2), BACKLOG_FUTURO (itens W2), .ai-context, .humano, phase_2_resumo.md | `docs/CURRENT_STATE.md`, `docs/DECISION_LOG.md`, `docs/BACKLOG_FUTURO.md`, `.ai-context`, `.humano`, `docs/phase_2_resumo.md` | Todos artefatos atualizados; testes 8/8 passando | CONCLUÍDO |
+
+### Meta da Onda 2
+- **Critério binário:** 8/8 testes Playwright passam consistentemente (5 Fase 1 + 3 Fase 2) + documentação viva atualizada
+- **Status:** CONCLUÍDO
+
+### CONTRATOS_DA_ONDA 2
+```
+OUTPUT_SCHEMAS:
+  W2-01: renderReadingMode() SEM .active em startIdx; highlightToken() via onboundary é fonte única de .active
+  W2-02: skipWhitespaceTokens(tokens, idx) -> number; playSpeech() chama em ambos branches após findStartToken
+  W2-03: clearReadingView() extrai texto via spans.textContent, calcula offset via lastReadTokenIdx, restaura cursor via tree-walk
+  W2-04: skipWhitespaceTokens: itera tokens a partir de idx enquanto !/\S/.test(token); retorna novo idx
+  W2-05: findStartToken(text, offset): usa tokenMap lógica para mapear char offset -> token index
+  W2-06: Teste Playwright — mock onend preserva tokens, keydown+input, 3 asserções (texto, cursor, sem tokens)
+  W2-07: Teste Playwright — tree-walk posiciona cursor em \n\n, playSpeech, asserção .active não whitespace
+  W2-08: Teste Playwright — verificação síncrona via window.__activeCountImmediatelyAfterPlay; 0 antes, 1 após boundary
+  W2-09: CURRENT_STATE: 10 invariantes, 8 testes, 19 módulos; DECISION_LOG: 10 linhas F2; .ai-context/.humano atualizados
+
+ESCOPO_CONGELADO:
+  - Nenhum arquivo fora de balabolka_web.html, tests/, docs/, .ai-context, .humano
+
+ARQUIVOS_A_DELETAR:
+  - Nenhum
+
+REESCRITAS:
+  - renderReadingMode(): INCREMENTAL — remoção de .active antecipado; preservação scrollTop/scrollHeight mantida
+  - clearReadingView(): TOTAL — reescrita completa para extrair texto dos spans, restaurar cursor via lastReadTokenIdx
+  - playSpeech(): INCREMENTAL — integração skipWhitespaceTokens em ambos branches; extração de findStartToken
+  - (Novos) skipWhitespaceTokens(), findStartToken(): TOTAL — criados
+
+SPECIALISTS_MVP:
+  - Nenhum (projeto monolito sem especialistas)
+
+DECISOES_EXTRAS:
+  - Teste Bug 1 usa verificação síncrona (window.__activeCountImmediatelyAfterPlay) para evitar race condition mock 5ms vs 10ms
+  - clearReadingView usa lastReadTokenIdx (não currentTokenIdx) como referência pois modo leitura parada preserva posição onde usuário clicou
+  - Invariant 8: renderReadingMode NUNCA aplica .active antecipado
+  - Invariant 9: skipWhitespaceTokens obrigatório quando findStartToken retorna whitespace
+  - Invariant 10: clearReadingView extrai texto dos spans ANTES de limpar innerHTML
 ```
 
 ---

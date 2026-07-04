@@ -2,11 +2,11 @@
 
 ## Resumo do Estado Atual
 - **Projeto:** Balabolka Web (Leitor-TTS-Desktop-WEB)
-- **Última fase concluída:** 1 — Correção de Bugs Críticos + Testes Automatizados
-- **Próxima fase:** 2 — a definir pelo usuário
+- **Última fase concluída:** 2 — Correção de 3 Bugs de Sincronização + Testes de Regressão
+- **Próxima fase:** 3 — a definir pelo usuário
 - **Status do build:** N/A (monolito HTML, sem build step)
-- **Status dos testes:** PASSANDO (5/5 Playwright)
-- **Principais módulos:** `playSpeech`, `stopSpeech`, `pauseSpeech`, `renderReadingMode`, `clearReadingView`, `restoreEditorMode`, `getCursorOffset`, `tokenize`, `splitTextIntoChunks`, `reapplySpeechIfPlaying`, `highlightToken`
+- **Status dos testes:** PASSANDO (8/8 Playwright)
+- **Principais módulos:** `playSpeech`, `stopSpeech`, `pauseSpeech`, `renderReadingMode`, `clearReadingView`, `restoreEditorMode`, `getCursorOffset`, `tokenize`, `splitTextIntoChunks`, `reapplySpeechIfPlaying`, `highlightToken`, `skipWhitespaceTokens`, `findStartToken`
 
 ## Leitura Obrigatória (antes de qualquer tarefa)
 1. `docs/CURRENT_STATE.md` — estado atual completo do sistema (arquitetura, contratos, invariantes, restrições, testes)

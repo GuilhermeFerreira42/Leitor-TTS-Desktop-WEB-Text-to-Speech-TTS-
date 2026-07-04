@@ -319,6 +319,24 @@ editor.addEventListener('click', function(e) {
   updateStatus();
 });
 
+// Adiciona um listener para duplo clique para sair do modo de leitura e editar
+editor.addEventListener('dblclick', function(e) {
+  if (state.isInReadingView) {
+    clearReadingView();
+    // Restaurar cursor para a posição original (ou final)
+    const textLength = editor.innerText.length;
+    if (textLength > 0) {
+      const range = document.createRange();
+      const sel = window.getSelection();
+      range.setStart(editor, editor.childNodes.length); // Coloca o cursor no final
+      range.collapse(true);
+      sel.removeAllRanges();
+      sel.addRange(range);
+    }
+    editor.focus();
+  }
+});
+
 editor.addEventListener('input', function() {
   // Somente limpa a visão de leitura quando há uma edição real no editor
   if (state.isInReadingView) {
@@ -329,6 +347,29 @@ editor.addEventListener('input', function() {
   saveTabs();
   updateStatus();
   showSavedNotif();
+});
+
+// Detecta digitação no modo leitura (contentEditable=false) e limpa o realce para permitir edição
+editor.addEventListener('keydown', function(e) {
+  if (!state.isInReadingView) return;
+  
+  // Ignora teclas de navegação/funcionais (setas, Home, End, PageUp/Down, Tab, Escape, etc.)
+  const navigationKeys = [
+    'ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown',
+    'Home', 'End', 'PageUp', 'PageDown',
+    'Tab', 'Escape', 'Enter', 'Backspace', 'Delete',
+    'Control', 'Alt', 'Shift', 'Meta', 'CapsLock',
+    'F1', 'F2', 'F3', 'F4', 'F5', 'F6', 'F7', 'F8', 'F9', 'F10', 'F11', 'F12'
+  ];
+  
+  // Se for tecla de navegação/funcional, não limpa o realce (permite seleção/navegação)
+  if (navigationKeys.includes(e.key)) return;
+  
+  // Se for combinação com Ctrl/Alt/Meta (atalhos), não limpa
+  if (e.ctrlKey || e.altKey || e.metaKey) return;
+  
+  // Se chegou aqui, é uma tecla de caractere imprimível → limpa realce para editar
+  clearReadingView();
 });
   const mdViewer = $('md-viewer');
   const tabbar = $('tabbar');
@@ -571,6 +612,20 @@ editor.addEventListener('input', function() {
     }
     return 0;
   }
+  
+  // Encontra o primeiro token não-whitespace a partir de um dado índice
+  // Usado para pular quebras de linha, espaços etc. quando o cursor está em linha vazia
+  function skipWhitespaceTokens(tokens, startIdx) {
+    var wsRegex = /^\s+$/;
+    for (var i = startIdx; i < tokens.length; i++) {
+      if (!wsRegex.test(tokens[i])) return i;
+    }
+    // Se todos os tokens a partir de startIdx são whitespace, retorna o primeiro token não-ws ou 0
+    for (var i = 0; i < tokens.length; i++) {
+      if (!wsRegex.test(tokens[i])) return i;
+    }
+    return 0;
+  }
 
   function renderReadingMode(tokens, startIdx) {
     // Salva a posição de scroll antes de modificar o innerHTML
@@ -579,18 +634,22 @@ editor.addEventListener('input', function() {
     editor.style.whiteSpace = 'pre-wrap';
     editor.innerHTML = tokens.map((tok, i) => {
       const cls = ['token'];
+      // Marca tokens ANTES do ponto de início como já lidos (histórico de leitura anterior)
       if (i < startIdx) cls.push('read');
-      if (i === startIdx) cls.push('active');
+      // NÃO marca startIdx como .active aqui — o primeiro onboundary vai fazer isso
+      // Isso evita o "realce prematuro": colorir texto que ainda não foi falado
       const isSpace = !/\S/.test(tok);
-      if (isSpace && !cls.includes('active')) cls.push('space');
+      if (isSpace) cls.push('space');
       return '<span class="' + cls.join(' ') + '" data-idx="' + i + '">' + escapeHtml(tok) + '</span>';
     }).join('');
     applyEditorStyles();
     // Restaura o scroll para a posição anterior
     editor.scrollTop = savedScrollTop;
-    const first = editor.querySelector('.token.active');
-    if (first) {
-      setTimeout(function() { first.scrollIntoView({ block: 'nearest', behavior: 'auto' }); }, 0);
+    // NÃO faz scrollIntoView de .active porque não há .active ainda (será criado pelo onboundary)
+    // Em vez disso, faz scroll para o primeiro token a ser lido (startIdx)
+    var startToken = editor.querySelector('.token[data-idx="' + startIdx + '"]');
+    if (startToken) {
+      setTimeout(function() { startToken.scrollIntoView({ block: 'nearest', behavior: 'auto' }); }, 0);
     }
   }
 
@@ -598,16 +657,17 @@ function restoreEditorMode() {
   clearKeepAlive();
   state.isPlaying = false;
   state.isPaused  = false;
+  state.currentUtterance = null; // Garante que não há utterance ativo
+  state.globalCharOffsetInChunkedText = 0; // Reseta offset para próxima leitura
+  state.isInReadingView = false; // Estado de leitura não está ativo após restore
 
-  if (state.currentTokenIdx >= 0) {
-    // Salva a posição e mantém os tokens coloridos visíveis
-    state.lastReadTokenIdx = state.currentTokenIdx;
-    state.isInReadingView  = true;
-    // Reativa edição — o editor deve ser editável exceto durante fala ativa
-    editor.contentEditable = 'true';
-    showEditHint(true);
+  if (state.currentTokenIdx >= 0) { // Se algo foi lido, preserva os tokens
+    state.lastReadTokenIdx = state.currentTokenIdx; // Atualiza o último token lido
+    state.isInReadingView = true; // Mantém a view de leitura para persistir
+    editor.contentEditable = 'false'; // Desabilita edição para manter o realce
+    showEditHint(true); // Indica que é possível interagir para editar (com dblclick)
   } else {
-    // Nada foi lido ainda — restaura normalmente
+    // Nada foi lido ou leitura terminou completamente, restaura para o modo de edição normal
     clearReadingView();
   }
 
@@ -617,16 +677,103 @@ function restoreEditorMode() {
 
 // Limpa a visão colorida e restaura o editor de texto normal
 function clearReadingView() {
+  // Salva a posição do cursor ANTES de limpar os spans, extraindo o texto real dos tokens
+  var cursorCharOffset = 0;
+  var allTokenSpans = editor.querySelectorAll('.token');
+  
+  // Extrai o texto real dos spans (não do state, que pode estar desatualizado)
+  var realText = '';
+  for (var s = 0; s < allTokenSpans.length; s++) {
+    realText += allTokenSpans[s].textContent || '';
+  }
+  
+  // Se não há spans, usa o innerText atual como fallback
+  if (!realText && allTokenSpans.length === 0) {
+    realText = editor.innerText || state.texts[state.activeTab] || '';
+  }
+  
+  // Calcula o offset do cursor baseado no lastReadTokenIdx (ou no token ativo)
+  var targetTokenIdx = state.lastReadTokenIdx >= 0 ? state.lastReadTokenIdx : state.currentTokenIdx;
+  if (targetTokenIdx >= 0) {
+    for (var s = 0; s < Math.min(targetTokenIdx, allTokenSpans.length); s++) {
+      cursorCharOffset += (allTokenSpans[s].textContent || '').length;
+    }
+  }
+  
   state.isInReadingView  = false;
   state.lastReadTokenIdx = -1;
   state.currentTokenIdx  = -1;
   state.readingTokens    = [];
   editor.contentEditable = 'true';
   editor.style.whiteSpace = 'pre-wrap';
-  editor.innerText = state.texts[state.activeTab] || '';
+  editor.innerText = realText;
+  // Atualiza o state para refletir o texto real extraído dos spans
+  if (realText) {
+    state.texts[state.activeTab] = realText;
+  }
   applyEditorStyles();
   showEditHint(false);
   updateStatus();
+
+  // Restaura o cursor para a posição onde o usuário estava (ou final do texto)
+  var textLength = editor.innerText.length;
+  var targetOffset = (cursorCharOffset > 0 && cursorCharOffset <= textLength) ? cursorCharOffset : textLength;
+  
+  if (textLength > 0) {
+    var range = document.createRange();
+    var sel = window.getSelection();
+    // Encontra o nó de texto e offset correspondente ao targetOffset via tree-walk
+    var pos = 0;
+    var foundNode = null, foundOffset = 0;
+    
+    function walkToOffset(node) {
+      if (foundNode) return;
+      if (node.nodeType === 3) {
+        var end = pos + node.length;
+        if (targetOffset >= pos && targetOffset <= end) {
+          foundNode = node;
+          foundOffset = targetOffset - pos;
+        }
+        pos += node.length;
+      } else if (node.nodeType === 1) {
+        if (node.tagName === 'BR') {
+          if (targetOffset === pos) { foundNode = node; foundOffset = 0; }
+          pos += 1;
+        }
+        for (var i = 0; i < node.childNodes.length; i++) {
+          walkToOffset(node.childNodes[i]);
+          if (foundNode) return;
+        }
+      }
+    }
+    
+    for (var i = 0; i < editor.childNodes.length; i++) {
+      walkToOffset(editor.childNodes[i]);
+      if (foundNode) break;
+    }
+    
+    if (foundNode && foundNode.nodeType === 3) {
+      range.setStart(foundNode, foundOffset);
+    } else if (foundNode && foundNode.tagName === 'BR') {
+      range.setStart(foundNode.parentNode, Array.prototype.indexOf.call(foundNode.parentNode.childNodes, foundNode));
+    } else {
+      // Fallback: final do editor
+      if (editor.childNodes.length > 0) {
+        var lastChild = editor.lastChild;
+        if (lastChild.nodeType === 3) {
+          range.setStart(lastChild, lastChild.length);
+        } else {
+          range.setStart(editor, editor.childNodes.length);
+        }
+      } else {
+        range.setStart(editor, 0);
+      }
+    }
+    range.collapse(true);
+    sel.removeAllRanges();
+    sel.addRange(range);
+    editor.focus();
+  }
 }
 
 // Mostra ou esconde o botão flutuante de editar
@@ -827,6 +974,8 @@ function playSpeech() {
 
     allTokens = tokenize(text);
     startIdx  = findStartToken(allTokens, cursorOffset);
+    // Se o cursor caiu em whitespace (linha vazia, espaços), pula para o próximo token não-whitespace
+    startIdx  = skipWhitespaceTokens(allTokens, startIdx);
   }
 
   let fullTextToSpeak = text.substring(cursorOffset); // Use original text substring
@@ -851,19 +1000,17 @@ function playSpeech() {
   // Divide em chunks para leitura contínua no Chrome/Edge
   const chunks = splitTextIntoChunks(fullTextToSpeak, 3000);
 
-  // Mapeia tokens para posições de caractere ABSOLUTAS no 'text' original (não 'fullTextToSpeak')
-  let charMapAcc = 0;
-  const tokenMap  = [];
+  // Mapeia tokens para posições de caractere ABSOLUTAS no 'text' original
+  // Esta parte é crucial para a sincronia
+  let absCharOffsetInFullText = 0;
+  const fullTextTokenMap = [];
   for (let i = 0; i < allTokens.length; i++) {
-    // Somente tokens que serão lidos
-    if (i >= startIdx) {
-      tokenMap.push({
-        start: charMapAcc,
-        end: charMapAcc + allTokens[i].length,
-        idx: i
-      });
-    }
-    charMapAcc += allTokens[i].length;
+    fullTextTokenMap.push({
+      start: absCharOffsetInFullText,
+      end: absCharOffsetInFullText + allTokens[i].length,
+      idx: i
+    });
+    absCharOffsetInFullText += allTokens[i].length;
   }
 
   let globalCharOffsetInChunkedText = 0; // Offset para o texto chunkado que a API está lendo
@@ -891,11 +1038,14 @@ function playSpeech() {
 
     utter.onboundary = function(e) {
       if (e.name !== 'word') return;
-      var absCharIndex = cursorOffset + chunkOffset + e.charIndex;
+      // Calcula o índice de caractere absoluto em relação ao texto COMPLETO original
+      var absCharIndex = cursorOffset + chunkOffset + e.charIndex; // cursorOffset já é absoluto
+
       var activeIdx = -1;
-      for (var t = 0; t < tokenMap.length; t++) {
-        if (absCharIndex >= tokenMap[t].start && absCharIndex < tokenMap[t].end) {
-          activeIdx = tokenMap[t].idx;
+      // Procura o token correspondente no fullTextTokenMap
+      for (var t = 0; t < fullTextTokenMap.length; t++) {
+        if (absCharIndex >= fullTextTokenMap[t].start && absCharIndex < fullTextTokenMap[t].end) {
+          activeIdx = fullTextTokenMap[t].idx;
           break;
         }
       }
@@ -932,7 +1082,7 @@ function playSpeech() {
   // =====================================================================
   function pauseSpeech() {
     if (!state.ttsSupported || !state.isPlaying || state.isPaused) return;
-    clearKeepAlive(); // === NOVO: para o keep-alive durante a pausa ===
+    clearKeepAlive();
     window.speechSynthesis.pause();
     state.isPaused = true;
     state.isPlaying = false;
@@ -946,36 +1096,40 @@ function playSpeech() {
   function reapplySpeechIfPlaying() {
     if (!state.ttsSupported || !state.isPlaying || state.isPaused) return;
 
-    clearKeepAlive(); // === NOVO: limpa o timer antigo antes de reiniciar ===
+    clearKeepAlive();
     if (window.speechSynthesis) {
       window.speechSynthesis.cancel();
     }
 
-    const startIdx = state.currentTokenIdx >= 0 ? state.currentTokenIdx : state.readingStartIdx;
-    const remainingText = state.readingTokens.slice(startIdx).join('');
-    if (!remainingText.trim()) return;
+    const currentText = getPlainText(); // Pega o texto atual (do editor)
+    const allTokens = tokenize(currentText); // Tokeniza o texto completo novamente
 
-    // === NOVO: também usa chunks ao reaplicar ===
-    // cursorOffsetReapply: total chars before startIdx in all readingTokens
-    var cursorOffsetReapply = 0;
-    for (var rti = 0; rti < startIdx; rti++) {
-      cursorOffsetReapply += state.readingTokens[rti].length;
+    const startIdx = state.currentTokenIdx >= 0 ? state.currentTokenIdx : state.readingStartIdx;
+
+    // Recalcula o cursorOffset (ponto de início no texto completo)
+    let cursorOffset = 0;
+    for (let i = 0; i < startIdx; i++) {
+        cursorOffset += allTokens[i].length;
     }
-    const fullTextToSpeakReapply = state.texts[state.activeTab].substring(cursorOffsetReapply);
+
+    const fullTextToSpeakReapply = currentText.substring(cursorOffset);
+    if (!fullTextToSpeakReapply.trim()) {
+        restoreEditorMode();
+        return;
+    }
+
     const chunks = splitTextIntoChunks(fullTextToSpeakReapply, 3000);
 
-    // Mapeia tokens para posições de caractere ABSOLUTAS no 'text' original (não 'fullTextToSpeakReapply')
-    let charMapAcc = 0;
-    const tokenMap = [];
-    for (let i = 0; i < state.readingTokens.length; i++) {
-      if (i >= startIdx) {
-        tokenMap.push({
-          start: charMapAcc,
-          end: charMapAcc + state.readingTokens[i].length,
-          idx: i
-        });
-      }
-      charMapAcc += state.readingTokens[i].length;
+    // Mapeia tokens para posições de caractere ABSOLUTAS no 'currentText' (texto completo)
+    let absCharOffsetInFullText = 0;
+    const fullTextTokenMap = [];
+    for (let i = 0; i < allTokens.length; i++) {
+      fullTextTokenMap.push({
+        start: absCharOffsetInFullText,
+        end: absCharOffsetInFullText + allTokens[i].length,
+        idx: i
+      });
+      absCharOffsetInFullText += allTokens[i].length;
     }
 
     let globalCharOffsetInChunkedText = 0;
@@ -997,7 +1151,7 @@ function playSpeech() {
       utter.pitch  = state.pitch;
       utter.volume = state.volume;
 
-      const chunkOffset = globalCharOffsetInChunkedText; // Usar o offset correto para o chunk
+      const chunkOffset = globalCharOffsetInChunkedText;
 
       utter.onstart = function() {
         startKeepAlive();
@@ -1005,21 +1159,15 @@ function playSpeech() {
 
       utter.onboundary = function(e) {
         if (e.name !== 'word') return;
-        var prefixLenReapply = 0;
-        for (var rti2 = 0; rti2 < startIdx; rti2++) {
-          prefixLenReapply += state.readingTokens[rti2].length;
-        }
-        const absCharIndexInFullText = prefixLenReapply + chunkOffset + e.charIndex;
-        
+        // Calcula o índice de caractere absoluto em relação ao texto COMPLETO original
+        const absCharIndex = cursorOffset + chunkOffset + e.charIndex;
+
         let activeIdx = -1;
-        let currentAbsCharAcc = 0;
-        for (let t = 0; t < state.readingTokens.length; t++) {
-            const tokenLength = state.readingTokens[t].length;
-            if (absCharIndexInFullText >= currentAbsCharAcc && absCharIndexInFullText < currentAbsCharAcc + tokenLength) {
-                activeIdx = t;
+        for (let t = 0; t < fullTextTokenMap.length; t++) {
+            if (absCharIndex >= fullTextTokenMap[t].start && absCharIndex < fullTextTokenMap[t].end) {
+                activeIdx = fullTextTokenMap[t].idx;
                 break;
             }
-            currentAbsCharAcc += tokenLength;
         }
 
         if (activeIdx !== -1 && activeIdx !== lastTokenIdx) {
@@ -1035,7 +1183,7 @@ function playSpeech() {
       };
 
       utter.onerror = function(e) {
-        clearKeepAlive(); // === NOVO ===
+        clearKeepAlive();
         if (e.error !== 'interrupted' && e.error !== 'canceled') {
           restoreEditorMode();
         }
